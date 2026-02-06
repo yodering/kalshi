@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 
-from .config import Settings
+from .config import Settings, redact_database_url
 from .kalshi_client import KalshiClient
 
 
@@ -29,8 +29,15 @@ def configure_logging() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
+    logger = logging.getLogger(__name__)
     args = build_parser().parse_args(argv)
     settings = Settings.from_env()
+    logger.info(
+        "startup kalshi_stub_mode=%s database_source=%s database_target=%s",
+        settings.kalshi_stub_mode,
+        settings.database_url_source,
+        redact_database_url(settings.database_url),
+    )
 
     if args.command == "health-check":
         client = KalshiClient(settings)

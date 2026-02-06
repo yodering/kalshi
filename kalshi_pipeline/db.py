@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import psycopg
 
@@ -10,7 +11,14 @@ from .models import Market, MarketSnapshot
 class PostgresStore:
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
-        self.conn = psycopg.connect(database_url)
+        try:
+            self.conn = psycopg.connect(database_url, connect_timeout=15)
+        except psycopg.OperationalError as exc:
+            host = urlsplit(database_url).hostname or "unknown-host"
+            raise RuntimeError(
+                f"Postgres connection failed for host '{host}'. "
+                "Verify Railway variable wiring for DATABASE_URL."
+            ) from exc
 
     def close(self) -> None:
         self.conn.close()
@@ -85,4 +93,3 @@ class PostgresStore:
                     inserted_count += 1
         self.conn.commit()
         return inserted_count
-

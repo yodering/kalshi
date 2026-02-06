@@ -63,7 +63,8 @@ python3 -m kalshi_pipeline.main health-check
 1. Create a Railway project and link this repo.
 2. Add a PostgreSQL service.
 3. Add env vars:
-- `DATABASE_URL` from Railway Postgres
+- `DATABASE_URL` exactly as a reference to Postgres service value, no quotes:
+  - `${{Postgres.DATABASE_URL}}`
 - `KALSHI_STUB_MODE=true` for now
 - Optional tuning vars (`POLL_INTERVAL_SECONDS`, `MARKET_LIMIT`, etc.)
 4. Deploy the service (uses `railway.json` + `Dockerfile`).
