@@ -70,6 +70,25 @@ python3 -m kalshi_pipeline.main health-check
 4. Deploy the service (uses `railway.json` + `Dockerfile`).
 5. Confirm logs show `poll_complete` every interval.
 
+## 5.1 Railway DB Troubleshooting
+
+If logs show `Name or service not known` with host `postgres.railway.internal`, your worker cannot resolve Railway private DNS in its current runtime/environment.
+
+Use one of these fixes:
+
+1. Preferred quick fix:
+- Set `DATABASE_URL=${{Postgres.DATABASE_PUBLIC_URL}}`
+- The app will enforce `sslmode=require` for public Railway hosts when missing.
+
+2. Explicit PG vars:
+- `PGHOST=${{Postgres.PGHOST}}`
+- `PGPORT=${{Postgres.PGPORT}}`
+- `PGUSER=${{Postgres.PGUSER}}`
+- `PGPASSWORD=${{Postgres.PGPASSWORD}}`
+- `PGDATABASE=${{Postgres.PGDATABASE}}`
+
+After any variable change, redeploy the worker service.
+
 ## 5. Notes
 
 - Current auth in live mode is intentionally a placeholder for Week 1.

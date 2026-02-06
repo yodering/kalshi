@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-from urllib.parse import quote_plus, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -43,6 +43,21 @@ def _build_database_url_from_parts() -> tuple[str, str] | None:
     return built, "PG* parts"
 
 
+def _add_sslmode_require_if_needed(url: str) -> str:
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    if "sslmode" in query:
+        return url
+    # Public Railway Postgres endpoints generally require SSL.
+    if host.endswith(".railway.app"):
+        query["sslmode"] = "require"
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+        )
+    return url
+
+
 def resolve_database_url() -> tuple[str, str]:
     key_order = [
         "DATABASE_URL",
@@ -57,11 +72,25 @@ def resolve_database_url() -> tuple[str, str]:
             continue
         if _is_unresolved_template(candidate):
             continue
-        return candidate, key
+        if ".railway.internal" in candidate:
+            public_fallback_order = [
+                "DATABASE_PUBLIC_URL",
+                "POSTGRES_PUBLIC_URL",
+                "POSTGRES_URL_NON_POOLING",
+                "PG_URL",
+            ]
+            for fallback_key in public_fallback_order:
+                fallback = _clean_env(os.getenv(fallback_key))
+                if not fallback or _is_unresolved_template(fallback):
+                    continue
+                if ".railway.internal" in fallback:
+                    continue
+                return _add_sslmode_require_if_needed(fallback), f"{key}->{fallback_key}"
+        return _add_sslmode_require_if_needed(candidate), key
 
     built = _build_database_url_from_parts()
     if built is not None:
-        return built
+        return _add_sslmode_require_if_needed(built[0]), built[1]
 
     return "postgresql://postgres:postgres@localhost:5432/kalshi", "default-local"
 
