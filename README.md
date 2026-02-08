@@ -64,6 +64,8 @@ python3 -m kalshi_pipeline.main discover-targets
 - `RUN_HISTORICAL_BACKFILL_ON_START`: `true` or `false`
 - `KALSHI_STUB_MODE`: `true` or `false` (default `false` in `.env.example`)
 - `KALSHI_BASE_URL`: Kalshi base URL (default `https://api.elections.kalshi.com`)
+  - Recommended production host: `https://api.elections.kalshi.com`
+  - Recommended demo host: `https://demo-api.kalshi.co`
 - `KALSHI_USE_AUTH_FOR_PUBLIC_DATA`: sign read-only requests too (default `false`)
 - `KALSHI_API_KEY_ID`: Kalshi key id
 - `KALSHI_API_KEY_SECRET`: private key PEM contents (or a file path if no PEM header is present)

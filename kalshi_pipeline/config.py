@@ -104,6 +104,34 @@ def _add_sslmode_require_if_needed(url: str) -> str:
     return url
 
 
+def _normalize_kalshi_base_url(value: str | None) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "https://api.elections.kalshi.com"
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parts = urlsplit(raw)
+    host = (parts.hostname or "").lower()
+    netloc = parts.netloc
+
+    # Historical/default Kalshi production host for Trade API endpoints.
+    if host == "api.kalshi.com":
+        host_port = "api.elections.kalshi.com"
+        if parts.port:
+            host_port = f"{host_port}:{parts.port}"
+        netloc = host_port
+
+    # Users sometimes paste full REST root; client appends /trade-api/v2 paths.
+    path = parts.path or ""
+    if path.endswith("/trade-api/v2"):
+        path = path[: -len("/trade-api/v2")]
+    if path.endswith("/trade-api/v2/"):
+        path = path[: -len("/trade-api/v2/")]
+    path = path.rstrip("/")
+
+    return urlunsplit((parts.scheme or "https", netloc, path, "", ""))
+
+
 def resolve_database_url() -> tuple[str, str]:
     key_order = [
         "DATABASE_URL",
@@ -199,7 +227,7 @@ class Settings:
                 os.getenv("RUN_HISTORICAL_BACKFILL_ON_START"), True
             ),
             kalshi_stub_mode=_as_bool(os.getenv("KALSHI_STUB_MODE"), True),
-            kalshi_base_url=os.getenv("KALSHI_BASE_URL", "https://api.elections.kalshi.com"),
+            kalshi_base_url=_normalize_kalshi_base_url(os.getenv("KALSHI_BASE_URL")),
             kalshi_use_auth_for_public_data=_as_bool(
                 os.getenv("KALSHI_USE_AUTH_FOR_PUBLIC_DATA"), False
             ),
