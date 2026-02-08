@@ -5,6 +5,74 @@ import os
 from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
 
+TRADING_PROFILE_DEFAULTS: dict[str, dict[str, float | int]] = {
+    "conservative": {
+        "paper_trade_min_edge_bps": 300,
+        "paper_trade_min_confidence": 0.35,
+        "paper_trade_contract_count": 1,
+        "paper_trade_max_orders_per_cycle": 1,
+        "paper_trade_cooldown_minutes": 45,
+        "paper_trade_min_price_cents": 8,
+        "paper_trade_max_price_cents": 92,
+        "telegram_min_edge_bps": 200,
+        "signal_min_edge_bps": 200,
+    },
+    "balanced": {
+        "paper_trade_min_edge_bps": 200,
+        "paper_trade_min_confidence": 0.25,
+        "paper_trade_contract_count": 2,
+        "paper_trade_max_orders_per_cycle": 2,
+        "paper_trade_cooldown_minutes": 30,
+        "paper_trade_min_price_cents": 5,
+        "paper_trade_max_price_cents": 95,
+        "telegram_min_edge_bps": 150,
+        "signal_min_edge_bps": 150,
+    },
+    "aggressive": {
+        "paper_trade_min_edge_bps": 125,
+        "paper_trade_min_confidence": 0.2,
+        "paper_trade_contract_count": 3,
+        "paper_trade_max_orders_per_cycle": 3,
+        "paper_trade_cooldown_minutes": 15,
+        "paper_trade_min_price_cents": 3,
+        "paper_trade_max_price_cents": 97,
+        "telegram_min_edge_bps": 100,
+        "signal_min_edge_bps": 100,
+    },
+}
+
+BOT_MODE_DEFAULTS: dict[str, dict[str, str | bool]] = {
+    "custom": {},
+    "demo_safe": {
+        "kalshi_base_url": "https://demo-api.kalshi.co",
+        "paper_trading_base_url": "https://demo-api.kalshi.co",
+        "paper_trading_enabled": True,
+        "paper_trading_mode": "kalshi_demo",
+        "kalshi_stub_mode": False,
+        "trading_profile": "conservative",
+        "kalshi_key_profile": "paper",
+    },
+    "live_safe": {
+        "kalshi_base_url": "https://api.elections.kalshi.com",
+        "paper_trading_base_url": "https://api.elections.kalshi.com",
+        "paper_trading_enabled": False,
+        "paper_trading_mode": "kalshi_demo",
+        "kalshi_stub_mode": False,
+        "trading_profile": "conservative",
+        "kalshi_key_profile": "real",
+    },
+    "live_auto": {
+        "kalshi_base_url": "https://api.elections.kalshi.com",
+        "paper_trading_base_url": "https://api.elections.kalshi.com",
+        "paper_trading_enabled": True,
+        "paper_trading_mode": "kalshi_demo",
+        "kalshi_stub_mode": False,
+        "trading_profile": "conservative",
+        "kalshi_key_profile": "real",
+    },
+}
+
+
 def _as_bool(value: str | None, default: bool) -> bool:
     if value is None:
         return default
@@ -68,6 +136,67 @@ def _as_paper_trading_mode(value: str | None) -> str:
     if normalized in {"kalshi_demo", "simulate"}:
         return normalized
     return "simulate"
+
+
+def _as_bot_mode(value: str | None, default: str = "custom") -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in BOT_MODE_DEFAULTS:
+        return normalized
+    return default
+
+
+def _as_key_profile(value: str | None, default: str = "direct") -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"direct", "paper", "real"}:
+        return normalized
+    return default
+
+
+def _as_trading_profile(value: str | None, default: str = "balanced") -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in TRADING_PROFILE_DEFAULTS:
+        return normalized
+    return default
+
+
+def _resolve_kalshi_credentials(
+    key_profile: str,
+) -> tuple[str, str, str]:
+    if key_profile == "paper":
+        key_id = (
+            os.getenv("KALSHI_PAPER_API_KEY_ID", "").strip()
+            or os.getenv("KALSHI_API_KEY_ID", "").strip()
+        )
+        key_secret = (
+            os.getenv("KALSHI_PAPER_API_KEY_SECRET", "").strip()
+            or os.getenv("KALSHI_API_KEY_SECRET", "").strip()
+        )
+        key_path = (
+            os.getenv("KALSHI_PAPER_PRIVATE_KEY_PATH", "").strip()
+            or os.getenv("KALSHI_PRIVATE_KEY_PATH", "").strip()
+        )
+        return key_id, key_secret, key_path
+
+    if key_profile == "real":
+        key_id = (
+            os.getenv("KALSHI_REAL_API_KEY_ID", "").strip()
+            or os.getenv("KALSHI_API_KEY_ID", "").strip()
+        )
+        key_secret = (
+            os.getenv("KALSHI_REAL_API_KEY_SECRET", "").strip()
+            or os.getenv("KALSHI_API_KEY_SECRET", "").strip()
+        )
+        key_path = (
+            os.getenv("KALSHI_REAL_PRIVATE_KEY_PATH", "").strip()
+            or os.getenv("KALSHI_PRIVATE_KEY_PATH", "").strip()
+        )
+        return key_id, key_secret, key_path
+
+    return (
+        os.getenv("KALSHI_API_KEY_ID", "").strip(),
+        os.getenv("KALSHI_API_KEY_SECRET", "").strip(),
+        os.getenv("KALSHI_PRIVATE_KEY_PATH", "").strip(),
+    )
 
 
 def _as_market_ids(value: str | None) -> list[str]:
@@ -228,6 +357,8 @@ def redact_database_url(url: str) -> str:
 class Settings:
     database_url: str
     database_url_source: str
+    bot_mode: str
+    kalshi_key_profile: str
     poll_interval_seconds: int
     market_limit: int
     historical_days: int
@@ -259,6 +390,7 @@ class Settings:
     btc_core_sources: list[str]
     btc_min_core_sources: int
     btc_momentum_lookback_minutes: int
+    trading_profile: str
     paper_trading_enabled: bool
     paper_trading_mode: str
     paper_trading_base_url: str
@@ -282,6 +414,22 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         database_url, database_url_source = resolve_database_url()
+        bot_mode = _as_bot_mode(os.getenv("BOT_MODE"), "custom")
+        mode_defaults = BOT_MODE_DEFAULTS.get(bot_mode, {})
+
+        default_key_profile = str(mode_defaults.get("kalshi_key_profile", "direct"))
+        kalshi_key_profile = _as_key_profile(
+            os.getenv("KALSHI_KEY_PROFILE"), default_key_profile
+        )
+        kalshi_api_key_id, kalshi_api_key_secret, kalshi_private_key_path = (
+            _resolve_kalshi_credentials(kalshi_key_profile)
+        )
+
+        default_trading_profile = str(mode_defaults.get("trading_profile", "balanced"))
+        trading_profile = _as_trading_profile(
+            os.getenv("TRADING_PROFILE"), default_trading_profile
+        )
+        profile_defaults = TRADING_PROFILE_DEFAULTS[trading_profile]
         btc_enabled_sources = _as_btc_sources(
             os.getenv("BTC_ENABLED_SOURCES"),
             ["coinbase", "kraken", "bitstamp"],
@@ -311,26 +459,39 @@ class Settings:
         if not paper_trade_signal_types:
             paper_trade_signal_types = ["weather", "btc"]
 
-        paper_trade_contract_count = _as_int(os.getenv("PAPER_TRADE_CONTRACT_COUNT"), 2)
+        paper_trade_contract_count = _as_int(
+            os.getenv("PAPER_TRADE_CONTRACT_COUNT"),
+            int(profile_defaults["paper_trade_contract_count"]),
+        )
         if paper_trade_contract_count < 1:
             paper_trade_contract_count = 1
         if paper_trade_contract_count > 50:
             paper_trade_contract_count = 50
 
         paper_trade_max_orders_per_cycle = _as_int(
-            os.getenv("PAPER_TRADE_MAX_ORDERS_PER_CYCLE"), 2
+            os.getenv("PAPER_TRADE_MAX_ORDERS_PER_CYCLE"),
+            int(profile_defaults["paper_trade_max_orders_per_cycle"]),
         )
         if paper_trade_max_orders_per_cycle < 1:
             paper_trade_max_orders_per_cycle = 1
         if paper_trade_max_orders_per_cycle > 20:
             paper_trade_max_orders_per_cycle = 20
 
-        paper_trade_cooldown_minutes = _as_int(os.getenv("PAPER_TRADE_COOLDOWN_MINUTES"), 30)
+        paper_trade_cooldown_minutes = _as_int(
+            os.getenv("PAPER_TRADE_COOLDOWN_MINUTES"),
+            int(profile_defaults["paper_trade_cooldown_minutes"]),
+        )
         if paper_trade_cooldown_minutes < 1:
             paper_trade_cooldown_minutes = 1
 
-        paper_trade_min_price_cents = _as_int(os.getenv("PAPER_TRADE_MIN_PRICE_CENTS"), 5)
-        paper_trade_max_price_cents = _as_int(os.getenv("PAPER_TRADE_MAX_PRICE_CENTS"), 95)
+        paper_trade_min_price_cents = _as_int(
+            os.getenv("PAPER_TRADE_MIN_PRICE_CENTS"),
+            int(profile_defaults["paper_trade_min_price_cents"]),
+        )
+        paper_trade_max_price_cents = _as_int(
+            os.getenv("PAPER_TRADE_MAX_PRICE_CENTS"),
+            int(profile_defaults["paper_trade_max_price_cents"]),
+        )
         if paper_trade_min_price_cents < 1:
             paper_trade_min_price_cents = 1
         if paper_trade_max_price_cents > 99:
@@ -339,7 +500,8 @@ class Settings:
             paper_trade_min_price_cents = min(paper_trade_max_price_cents, 5)
 
         paper_trade_min_confidence = _as_float(
-            os.getenv("PAPER_TRADE_MIN_CONFIDENCE"), 0.25
+            os.getenv("PAPER_TRADE_MIN_CONFIDENCE"),
+            float(profile_defaults["paper_trade_min_confidence"]),
         )
         if paper_trade_min_confidence < 0.0:
             paper_trade_min_confidence = 0.0
@@ -349,6 +511,8 @@ class Settings:
         return cls(
             database_url=database_url,
             database_url_source=database_url_source,
+            bot_mode=bot_mode,
+            kalshi_key_profile=kalshi_key_profile,
             poll_interval_seconds=_as_int(os.getenv("POLL_INTERVAL_SECONDS"), 300),
             market_limit=_as_int(os.getenv("MARKET_LIMIT"), 25),
             historical_days=_as_int(os.getenv("HISTORICAL_DAYS"), 7),
@@ -356,14 +520,22 @@ class Settings:
             run_historical_backfill_on_start=_as_bool(
                 os.getenv("RUN_HISTORICAL_BACKFILL_ON_START"), True
             ),
-            kalshi_stub_mode=_as_bool(os.getenv("KALSHI_STUB_MODE"), True),
-            kalshi_base_url=_normalize_kalshi_base_url(os.getenv("KALSHI_BASE_URL")),
+            kalshi_stub_mode=_as_bool(
+                os.getenv("KALSHI_STUB_MODE"),
+                bool(mode_defaults.get("kalshi_stub_mode", True)),
+            ),
+            kalshi_base_url=_normalize_kalshi_base_url(
+                os.getenv(
+                    "KALSHI_BASE_URL",
+                    str(mode_defaults.get("kalshi_base_url", "https://api.elections.kalshi.com")),
+                )
+            ),
             kalshi_use_auth_for_public_data=_as_bool(
                 os.getenv("KALSHI_USE_AUTH_FOR_PUBLIC_DATA"), False
             ),
-            kalshi_api_key_id=os.getenv("KALSHI_API_KEY_ID", ""),
-            kalshi_api_key_secret=os.getenv("KALSHI_API_KEY_SECRET", ""),
-            kalshi_private_key_path=os.getenv("KALSHI_PRIVATE_KEY_PATH", ""),
+            kalshi_api_key_id=kalshi_api_key_id,
+            kalshi_api_key_secret=kalshi_api_key_secret,
+            kalshi_private_key_path=kalshi_private_key_path,
             target_market_tickers=_as_market_ids(os.getenv("TARGET_MARKET_TICKERS")),
             target_event_tickers=_as_market_ids(os.getenv("TARGET_EVENT_TICKERS")),
             target_series_tickers=_as_market_ids(
@@ -398,13 +570,28 @@ class Settings:
             btc_momentum_lookback_minutes=_as_int(
                 os.getenv("BTC_MOMENTUM_LOOKBACK_MINUTES"), 5
             ),
-            paper_trading_enabled=_as_bool(os.getenv("PAPER_TRADING_ENABLED"), False),
-            paper_trading_mode=_as_paper_trading_mode(os.getenv("PAPER_TRADING_MODE")),
+            trading_profile=trading_profile,
+            paper_trading_enabled=_as_bool(
+                os.getenv("PAPER_TRADING_ENABLED"),
+                bool(mode_defaults.get("paper_trading_enabled", False)),
+            ),
+            paper_trading_mode=_as_paper_trading_mode(
+                os.getenv(
+                    "PAPER_TRADING_MODE",
+                    str(mode_defaults.get("paper_trading_mode", "simulate")),
+                )
+            ),
             paper_trading_base_url=_normalize_kalshi_base_url(
-                os.getenv("PAPER_TRADING_BASE_URL", "https://demo-api.kalshi.co")
+                os.getenv(
+                    "PAPER_TRADING_BASE_URL",
+                    str(mode_defaults.get("paper_trading_base_url", "https://demo-api.kalshi.co")),
+                )
             ),
             paper_trade_signal_types=paper_trade_signal_types,
-            paper_trade_min_edge_bps=_as_int(os.getenv("PAPER_TRADE_MIN_EDGE_BPS"), 200),
+            paper_trade_min_edge_bps=_as_int(
+                os.getenv("PAPER_TRADE_MIN_EDGE_BPS"),
+                int(profile_defaults["paper_trade_min_edge_bps"]),
+            ),
             paper_trade_min_confidence=paper_trade_min_confidence,
             paper_trade_contract_count=paper_trade_contract_count,
             paper_trade_max_orders_per_cycle=paper_trade_max_orders_per_cycle,
@@ -420,7 +607,13 @@ class Settings:
             telegram_notify_execution_events=_as_bool(
                 os.getenv("TELEGRAM_NOTIFY_EXECUTION_EVENTS"), True
             ),
-            telegram_min_edge_bps=_as_int(os.getenv("TELEGRAM_MIN_EDGE_BPS"), 150),
-            signal_min_edge_bps=_as_int(os.getenv("SIGNAL_MIN_EDGE_BPS"), 150),
+            telegram_min_edge_bps=_as_int(
+                os.getenv("TELEGRAM_MIN_EDGE_BPS"),
+                int(profile_defaults["telegram_min_edge_bps"]),
+            ),
+            signal_min_edge_bps=_as_int(
+                os.getenv("SIGNAL_MIN_EDGE_BPS"),
+                int(profile_defaults["signal_min_edge_bps"]),
+            ),
             signal_store_all=_as_bool(os.getenv("SIGNAL_STORE_ALL"), True),
         )

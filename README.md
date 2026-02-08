@@ -64,15 +64,23 @@ python3 -m kalshi_pipeline.main discover-targets
 - `HISTORICAL_DAYS`: backfill window on startup (default `7`)
 - `HISTORICAL_MARKETS`: number of markets to backfill (default `10`)
 - `RUN_HISTORICAL_BACKFILL_ON_START`: `true` or `false`
+- `BOT_MODE`: `custom`, `demo_safe`, `live_safe`, or `live_auto`
 - `KALSHI_STUB_MODE`: `true` or `false` (default `false` in `.env.example`)
 - `KALSHI_BASE_URL`: Kalshi base URL (default `https://api.elections.kalshi.com`)
   - Recommended production host: `https://api.elections.kalshi.com`
   - Recommended demo host: `https://demo-api.kalshi.co`
 - `KALSHI_USE_AUTH_FOR_PUBLIC_DATA`: sign read-only requests too (default `false`)
+- `KALSHI_KEY_PROFILE`: `direct`, `paper`, or `real`
 - `KALSHI_API_KEY_ID`: Kalshi key id
 - `KALSHI_API_KEY_SECRET`: private key PEM contents (or a file path if no PEM header is present)
 - `KALSHI_PRIVATE_KEY_PATH`: optional explicit path to key PEM file
 - `KALSHI_PRIVATE_KEY_PASSWORD`: optional private key password
+- `KALSHI_PAPER_API_KEY_ID`: demo key id used when `KALSHI_KEY_PROFILE=paper`
+- `KALSHI_PAPER_API_KEY_SECRET`: demo private key PEM used when `KALSHI_KEY_PROFILE=paper`
+- `KALSHI_PAPER_PRIVATE_KEY_PATH`: optional demo key path
+- `KALSHI_REAL_API_KEY_ID`: production key id used when `KALSHI_KEY_PROFILE=real`
+- `KALSHI_REAL_API_KEY_SECRET`: production private key PEM used when `KALSHI_KEY_PROFILE=real`
+- `KALSHI_REAL_PRIVATE_KEY_PATH`: optional production key path
 - `TARGET_MARKET_QUERY_GROUPS`: semicolon-separated keyword groups (default: highest NYC temp today + BTC up/down 15m)
 - `TARGET_MARKET_STATUS`: market status filter (default `open`, set `any` to disable status filter)
 - `TARGET_MARKET_DISCOVERY_PAGES`: max pages scanned during target discovery (default `10`)
@@ -93,6 +101,7 @@ python3 -m kalshi_pipeline.main discover-targets
 - `BTC_CORE_SOURCES`: comma-separated core sources used for fair-value composite (default `coinbase,kraken,bitstamp`)
 - `BTC_MIN_CORE_SOURCES`: minimum core sources required to emit BTC signals (default `2`)
 - `BTC_MOMENTUM_LOOKBACK_MINUTES`: lookback used in BTC momentum signal
+- `TRADING_PROFILE`: `conservative`, `balanced`, or `aggressive` preset for signal/trade thresholds
 - `PAPER_TRADING_ENABLED`: enable auto paper execution (`false` by default)
 - `PAPER_TRADING_MODE`: `simulate` or `kalshi_demo`
 - `PAPER_TRADING_BASE_URL`: paper trading API host (default `https://demo-api.kalshi.co`)
@@ -112,6 +121,35 @@ python3 -m kalshi_pipeline.main discover-targets
 - `TELEGRAM_MIN_EDGE_BPS`: minimum edge threshold for actionable Telegram digest filtering
 - `SIGNAL_MIN_EDGE_BPS`: minimum edge for actionable direction
 - `SIGNAL_STORE_ALL`: store flat signals too (`true` by default)
+
+`TRADING_PROFILE` sets defaults for:
+- `PAPER_TRADE_MIN_EDGE_BPS`
+- `PAPER_TRADE_MIN_CONFIDENCE`
+- `PAPER_TRADE_CONTRACT_COUNT`
+- `PAPER_TRADE_MAX_ORDERS_PER_CYCLE`
+- `PAPER_TRADE_COOLDOWN_MINUTES`
+- `PAPER_TRADE_MIN_PRICE_CENTS`
+- `PAPER_TRADE_MAX_PRICE_CENTS`
+- `TELEGRAM_MIN_EDGE_BPS`
+- `SIGNAL_MIN_EDGE_BPS`
+
+Explicit env values still win over the profile defaults.
+
+`BOT_MODE` sets defaults for URLs, key profile, and execution behavior:
+- `demo_safe`: demo URLs, paper key profile, conservative profile, auto paper trading enabled
+- `live_safe`: production URLs, real key profile, conservative profile, auto trading disabled
+- `live_auto`: production URLs, real key profile, conservative profile, auto trading enabled
+- `custom`: no opinionated mode defaults
+
+For a simple Railway setup, keep only these vars first and rely on defaults for the rest:
+- `DATABASE_URL`
+- `BOT_MODE=demo_safe`
+- `KALSHI_KEY_PROFILE=paper`
+- `KALSHI_PAPER_API_KEY_ID`
+- `KALSHI_PAPER_API_KEY_SECRET`
+- `TELEGRAM_ENABLED=true`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
 
 ## 4. Railway Deployment
 
