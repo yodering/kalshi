@@ -74,8 +74,13 @@ class KalshiClient:
     def health_check(self) -> dict[str, Any]:
         if self.settings.kalshi_stub_mode:
             return {"ok": True, "mode": "stub"}
-        payload = self._request_json("GET", "/trade-api/v2/portfolio/balance")
-        return {"ok": True, "mode": "live", "result_keys": sorted(payload.keys())}
+        if self.settings.kalshi_use_auth_for_public_data:
+            payload = self._request_json(
+                "GET", "/trade-api/v2/portfolio/balance", require_auth=True
+            )
+            return {"ok": True, "mode": "live-auth", "result_keys": sorted(payload.keys())}
+        payload = self._request_json("GET", "/trade-api/v2/markets", params={"limit": 1})
+        return {"ok": True, "mode": "live-public", "result_keys": sorted(payload.keys())}
 
     def list_markets(self, limit: int) -> list[Market]:
         if self.settings.kalshi_stub_mode:
@@ -167,31 +172,41 @@ class KalshiClient:
         return rows
 
     def _discover_target_markets(self, limit: int) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"limit": min(1000, max(1, limit))}
+        base_params: dict[str, Any] = {"limit": min(1000, max(1, limit))}
         if self.settings.target_market_status:
-            params["status"] = self.settings.target_market_status
+            base_params["status"] = self.settings.target_market_status
+
+        search_param_sets: list[dict[str, Any]]
+        if self.settings.target_series_tickers:
+            search_param_sets = [
+                {**base_params, "series_ticker": series}
+                for series in self.settings.target_series_tickers
+            ]
+        else:
+            search_param_sets = [base_params]
 
         matched: dict[str, dict[str, Any]] = {}
-        pages_seen = 0
-        cursor: str | None = None
-        while pages_seen < self.settings.target_market_discovery_pages:
-            page_params = dict(params)
-            if cursor:
-                page_params["cursor"] = cursor
-            payload = self._request_json("GET", "/trade-api/v2/markets", params=page_params)
-            rows = payload.get("markets") or payload.get("data") or []
-            if not rows:
-                break
-            for row in rows:
-                if not self._matches_targets(row):
-                    continue
-                ticker = str(row.get("ticker", "")).strip()
-                if ticker:
-                    matched[ticker] = row
-            pages_seen += 1
-            cursor = payload.get("cursor")
-            if not cursor:
-                break
+        for params in search_param_sets:
+            pages_seen = 0
+            cursor: str | None = None
+            while pages_seen < self.settings.target_market_discovery_pages:
+                page_params = dict(params)
+                if cursor:
+                    page_params["cursor"] = cursor
+                payload = self._request_json("GET", "/trade-api/v2/markets", params=page_params)
+                rows = payload.get("markets") or payload.get("data") or []
+                if not rows:
+                    break
+                for row in rows:
+                    if not self._matches_targets(row):
+                        continue
+                    ticker = str(row.get("ticker", "")).strip()
+                    if ticker:
+                        matched[ticker] = row
+                pages_seen += 1
+                cursor = payload.get("cursor")
+                if not cursor:
+                    break
 
         if matched:
             return list(matched.values())[:limit]
@@ -217,15 +232,25 @@ class KalshiClient:
             return True
         return False
 
-    def _request_json(self, method: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        require_auth: bool = False,
+    ) -> dict[str, Any]:
         url = f"{self.settings.kalshi_base_url.rstrip('/')}{path}"
         split = urlsplit(url)
         path_for_signing = split.path or path
+        headers = {"Accept": "application/json"}
+        should_authenticate = require_auth or self.settings.kalshi_use_auth_for_public_data
+        if should_authenticate:
+            headers.update(self._build_auth_headers(method=method, path=path_for_signing))
         response = self.session.request(
             method=method,
             url=url,
             params=params,
-            headers=self._build_auth_headers(method=method, path=path_for_signing),
+            headers=headers,
             timeout=20,
         )
         response.raise_for_status()
@@ -235,9 +260,6 @@ class KalshiClient:
         return {"data": payload}
 
     def _build_auth_headers(self, method: str, path: str) -> dict[str, str]:
-        base_headers = {"Accept": "application/json"}
-        if self.settings.kalshi_stub_mode:
-            return base_headers
         if hashes is None or serialization is None or padding is None:
             raise RuntimeError(
                 "Missing dependency 'cryptography'. Install requirements before live mode."
@@ -259,7 +281,6 @@ class KalshiClient:
         )
         signature_b64 = base64.b64encode(signature).decode("utf-8")
         return {
-            **base_headers,
             "KALSHI-ACCESS-KEY": self.settings.kalshi_api_key_id,
             "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
             "KALSHI-ACCESS-SIGNATURE": signature_b64,

@@ -155,6 +155,7 @@ class Settings:
     run_historical_backfill_on_start: bool
     kalshi_stub_mode: bool
     kalshi_base_url: str
+    kalshi_use_auth_for_public_data: bool
     kalshi_api_key_id: str
     kalshi_api_key_secret: str
     kalshi_private_key_path: str
@@ -180,7 +181,10 @@ class Settings:
                 os.getenv("RUN_HISTORICAL_BACKFILL_ON_START"), True
             ),
             kalshi_stub_mode=_as_bool(os.getenv("KALSHI_STUB_MODE"), True),
-            kalshi_base_url=os.getenv("KALSHI_BASE_URL", "https://api.kalshi.com"),
+            kalshi_base_url=os.getenv("KALSHI_BASE_URL", "https://api.elections.kalshi.com"),
+            kalshi_use_auth_for_public_data=_as_bool(
+                os.getenv("KALSHI_USE_AUTH_FOR_PUBLIC_DATA"), False
+            ),
             kalshi_api_key_id=os.getenv("KALSHI_API_KEY_ID", ""),
             kalshi_api_key_secret=os.getenv("KALSHI_API_KEY_SECRET", ""),
             kalshi_private_key_path=os.getenv("KALSHI_PRIVATE_KEY_PATH", ""),
@@ -190,7 +194,7 @@ class Settings:
             target_market_query_groups=_as_groups(
                 os.getenv(
                     "TARGET_MARKET_QUERY_GROUPS",
-                    "new york city temperature;bitcoin up or down 15 minutes",
+                    "highest temperature in nyc today;bitcoin price up down 15 minutes",
                 )
             ),
             target_market_status=os.getenv("TARGET_MARKET_STATUS", "open").strip() or "open",

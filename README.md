@@ -60,12 +60,13 @@ python3 -m kalshi_pipeline.main discover-targets
 - `HISTORICAL_MARKETS`: number of markets to backfill (default `10`)
 - `RUN_HISTORICAL_BACKFILL_ON_START`: `true` or `false`
 - `KALSHI_STUB_MODE`: `true` or `false` (default `false` in `.env.example`)
-- `KALSHI_BASE_URL`: Kalshi base URL
+- `KALSHI_BASE_URL`: Kalshi base URL (default `https://api.elections.kalshi.com`)
+- `KALSHI_USE_AUTH_FOR_PUBLIC_DATA`: sign read-only requests too (default `false`)
 - `KALSHI_API_KEY_ID`: Kalshi key id
 - `KALSHI_API_KEY_SECRET`: private key PEM contents (or a file path if no PEM header is present)
 - `KALSHI_PRIVATE_KEY_PATH`: optional explicit path to key PEM file
 - `KALSHI_PRIVATE_KEY_PASSWORD`: optional private key password
-- `TARGET_MARKET_QUERY_GROUPS`: semicolon-separated keyword groups (default: NYC temperature + BTC 15m up/down)
+- `TARGET_MARKET_QUERY_GROUPS`: semicolon-separated keyword groups (default: highest NYC temp today + BTC up/down 15m)
 - `TARGET_MARKET_STATUS`: market status filter (default `open`)
 - `TARGET_MARKET_DISCOVERY_PAGES`: max pages scanned during target discovery (default `10`)
 - `TARGET_MARKET_TICKERS`: optional comma-separated exact market tickers (or full Kalshi market URLs)
@@ -107,6 +108,7 @@ After any variable change, redeploy the worker service.
 ## 5. Notes
 
 - Live mode now signs each request (`timestamp + method + path`) using RSA-PSS/SHA256.
+- Public read endpoints (markets/orderbook/trades) run without auth by default for lower complexity and fewer failure points.
 - If no markets match your filters, logs will show:
   - `No markets matched current target filters. Check TARGET_* env settings.`
 - When `TARGET_MARKET_TICKERS` is set, the pipeline fetches those exact contracts directly.
