@@ -138,6 +138,13 @@ def _as_paper_trading_mode(value: str | None) -> str:
     return "simulate"
 
 
+def _as_paper_trade_sizing_mode(value: str | None) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"fixed", "kelly"}:
+        return normalized
+    return "kelly"
+
+
 def _as_bot_mode(value: str | None, default: str = "custom") -> str:
     normalized = (value or "").strip().lower()
     if normalized in BOT_MODE_DEFAULTS:
@@ -367,6 +374,7 @@ class Settings:
     kalshi_stub_mode: bool
     kalshi_base_url: str
     kalshi_use_auth_for_public_data: bool
+    websocket_enabled: bool
     kalshi_api_key_id: str
     kalshi_api_key_secret: str
     kalshi_private_key_path: str
@@ -402,12 +410,19 @@ class Settings:
     paper_trade_cooldown_minutes: int
     paper_trade_min_price_cents: int
     paper_trade_max_price_cents: int
+    paper_trade_maker_only: bool
+    paper_trade_enable_arbitrage: bool
+    paper_trade_sizing_mode: str
+    kelly_fraction_scale: float
+    paper_trade_max_position_dollars: float
+    paper_trade_max_portfolio_exposure_dollars: float
     telegram_enabled: bool
     telegram_bot_token: str
     telegram_chat_id: str
     telegram_notify_actionable_only: bool
     telegram_notify_execution_events: bool
     telegram_min_edge_bps: int
+    edge_decay_alert_threshold_bps: int
     signal_min_edge_bps: int
     signal_store_all: bool
 
@@ -508,6 +523,24 @@ class Settings:
         if paper_trade_min_confidence > 1.0:
             paper_trade_min_confidence = 1.0
 
+        kelly_fraction_scale = _as_float(os.getenv("KELLY_FRACTION_SCALE"), 0.25)
+        if kelly_fraction_scale < 0.0:
+            kelly_fraction_scale = 0.0
+        if kelly_fraction_scale > 1.0:
+            kelly_fraction_scale = 1.0
+
+        max_position_dollars = _as_float(
+            os.getenv("PAPER_TRADE_MAX_POSITION_DOLLARS"), 50.0
+        )
+        if max_position_dollars < 1.0:
+            max_position_dollars = 1.0
+
+        max_portfolio_exposure_dollars = _as_float(
+            os.getenv("PAPER_TRADE_MAX_PORTFOLIO_EXPOSURE_DOLLARS"), 500.0
+        )
+        if max_portfolio_exposure_dollars < max_position_dollars:
+            max_portfolio_exposure_dollars = max_position_dollars
+
         return cls(
             database_url=database_url,
             database_url_source=database_url_source,
@@ -533,6 +566,7 @@ class Settings:
             kalshi_use_auth_for_public_data=_as_bool(
                 os.getenv("KALSHI_USE_AUTH_FOR_PUBLIC_DATA"), False
             ),
+            websocket_enabled=_as_bool(os.getenv("WEBSOCKET_ENABLED"), False),
             kalshi_api_key_id=kalshi_api_key_id,
             kalshi_api_key_secret=kalshi_api_key_secret,
             kalshi_private_key_path=kalshi_private_key_path,
@@ -598,6 +632,16 @@ class Settings:
             paper_trade_cooldown_minutes=paper_trade_cooldown_minutes,
             paper_trade_min_price_cents=paper_trade_min_price_cents,
             paper_trade_max_price_cents=paper_trade_max_price_cents,
+            paper_trade_maker_only=_as_bool(os.getenv("PAPER_TRADE_MAKER_ONLY"), True),
+            paper_trade_enable_arbitrage=_as_bool(
+                os.getenv("PAPER_TRADE_ENABLE_ARBITRAGE"), True
+            ),
+            paper_trade_sizing_mode=_as_paper_trade_sizing_mode(
+                os.getenv("PAPER_TRADE_SIZING_MODE")
+            ),
+            kelly_fraction_scale=kelly_fraction_scale,
+            paper_trade_max_position_dollars=max_position_dollars,
+            paper_trade_max_portfolio_exposure_dollars=max_portfolio_exposure_dollars,
             telegram_enabled=_as_bool(os.getenv("TELEGRAM_ENABLED"), False),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
@@ -610,6 +654,9 @@ class Settings:
             telegram_min_edge_bps=_as_int(
                 os.getenv("TELEGRAM_MIN_EDGE_BPS"),
                 int(profile_defaults["telegram_min_edge_bps"]),
+            ),
+            edge_decay_alert_threshold_bps=_as_int(
+                os.getenv("EDGE_DECAY_ALERT_THRESHOLD_BPS"), 75
             ),
             signal_min_edge_bps=_as_int(
                 os.getenv("SIGNAL_MIN_EDGE_BPS"),

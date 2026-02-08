@@ -44,6 +44,24 @@ Run continuous polling:
 python3 -m kalshi_pipeline.main run
 ```
 
+Run async polling + websocket feeds (Kalshi, Binance, Coinbase, Kraken):
+
+```bash
+python3 -m kalshi_pipeline.main run-async
+```
+
+Operational/debug CLI:
+
+```bash
+python3 -m kalshi_pipeline.cli status
+python3 -m kalshi_pipeline.cli positions
+python3 -m kalshi_pipeline.cli accuracy --days 30
+python3 -m kalshi_pipeline.cli signals --last 20
+python3 -m kalshi_pipeline.cli trades --last 20
+python3 -m kalshi_pipeline.cli orderbook KXBTC15M-26FEB081830-30
+python3 -m kalshi_pipeline.cli forecast --last 40
+```
+
 Check API connectivity mode:
 
 ```bash
@@ -70,6 +88,7 @@ python3 -m kalshi_pipeline.main discover-targets
   - Recommended production host: `https://api.elections.kalshi.com`
   - Recommended demo host: `https://demo-api.kalshi.co`
 - `KALSHI_USE_AUTH_FOR_PUBLIC_DATA`: sign read-only requests too (default `false`)
+- `WEBSOCKET_ENABLED`: enable async runtime with websocket feeds when using `run`/`run-async`
 - `KALSHI_KEY_PROFILE`: `direct`, `paper`, or `real`
 - `KALSHI_API_KEY_ID`: Kalshi key id
 - `KALSHI_API_KEY_SECRET`: private key PEM contents (or a file path if no PEM header is present)
@@ -113,12 +132,19 @@ python3 -m kalshi_pipeline.main discover-targets
 - `PAPER_TRADE_COOLDOWN_MINUTES`: cooldown before repeating same ticker+direction
 - `PAPER_TRADE_MIN_PRICE_CENTS`: lower clamp for limit order price
 - `PAPER_TRADE_MAX_PRICE_CENTS`: upper clamp for limit order price
+- `PAPER_TRADE_MAKER_ONLY`: force maker-style pricing on auto orders
+- `PAPER_TRADE_ENABLE_ARBITRAGE`: place paired yes/no orders when `yes_ask + no_ask < 100`
+- `PAPER_TRADE_SIZING_MODE`: `fixed` or `kelly`
+- `KELLY_FRACTION_SCALE`: Kelly multiplier (`0.25` default for quarter-Kelly)
+- `PAPER_TRADE_MAX_POSITION_DOLLARS`: hard cap per order
+- `PAPER_TRADE_MAX_PORTFOLIO_EXPOSURE_DOLLARS`: hard cap across open exposure
 - `TELEGRAM_ENABLED`: enable Telegram notifications
 - `TELEGRAM_BOT_TOKEN`: Telegram bot token
 - `TELEGRAM_CHAT_ID`: Telegram chat id
 - `TELEGRAM_NOTIFY_ACTIONABLE_ONLY`: if true, only actionable signal digest messages
 - `TELEGRAM_NOTIFY_EXECUTION_EVENTS`: if true, send paper execution digest messages
 - `TELEGRAM_MIN_EDGE_BPS`: minimum edge threshold for actionable Telegram digest filtering
+- `EDGE_DECAY_ALERT_THRESHOLD_BPS`: alert when open position edge decays below threshold
 - `SIGNAL_MIN_EDGE_BPS`: minimum edge for actionable direction
 - `SIGNAL_STORE_ALL`: store flat signals too (`true` by default)
 
@@ -198,6 +224,11 @@ After any variable change, redeploy the worker service.
   - `PAPER_TRADING_MODE=simulate` to record "would trade" intents only
 - For `kalshi_demo` mode, keep data and order environments aligned to avoid ticker mismatches
   between production and demo market catalogs.
+- Telegram command interface (same configured chat id):
+  - `/status`, `/signals`, `/orders`, `/positions`, `/balance`, `/accuracy [days]`
+  - `/pause`, `/resume`
+  - `/mode [custom|demo_safe|live_safe|live_auto]`
+  - `CONFIRM LIVE` to confirm pending live mode change
 
 ## 6. Stored Tables
 

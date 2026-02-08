@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 
+from .analysis.accuracy_report import generate_accuracy_report
 from .config import Settings
 from .models import AlertEvent, PaperTradeOrder, SignalRecord
+
+if TYPE_CHECKING:
+    from .pipeline import DataPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +69,7 @@ class TelegramNotifier:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._session = requests.Session()
+        self._updates_offset = 0
 
     def is_enabled(self) -> bool:
         return (
@@ -89,6 +94,156 @@ class TelegramNotifier:
             order_event = self._send_paper_execution_digest(now_utc, paper_orders)
             if order_event is not None:
                 events.append(order_event)
+        return events
+
+    def poll_commands(self, pipeline: "DataPipeline") -> list[AlertEvent]:
+        if not self.is_enabled():
+            return []
+        updates = self._fetch_updates()
+        if not updates:
+            return []
+        events: list[AlertEvent] = []
+        configured_chat_id = str(self.settings.telegram_chat_id).strip()
+        for update in updates:
+            message = update.get("message")
+            if not isinstance(message, dict):
+                continue
+            chat = message.get("chat")
+            if not isinstance(chat, dict):
+                continue
+            chat_id = str(chat.get("id"))
+            if configured_chat_id and chat_id != configured_chat_id:
+                continue
+            text = str(message.get("text", "")).strip()
+            if not text:
+                continue
+            response_text = self._handle_command(text, pipeline)
+            if response_text is None:
+                continue
+            status, metadata = self._send_message(response_text)
+            events.append(
+                AlertEvent(
+                    channel="telegram",
+                    event_type="telegram_command",
+                    market_ticker=None,
+                    message=response_text,
+                    status=status,
+                    metadata={"request_text": text, **metadata},
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+        return events
+
+    def _handle_command(self, text: str, pipeline: "DataPipeline") -> str | None:
+        normalized = text.strip()
+        lower = normalized.lower()
+        if lower == "confirm live":
+            return pipeline.confirm_live_mode()
+
+        if lower == "/status":
+            status = pipeline.get_runtime_status()
+            return (
+                "📡 Bot Status\n"
+                f"mode={status['mode']}\n"
+                f"paused={status['paused']}\n"
+                f"last_poll={status.get('last_poll_at')}\n"
+                f"last_metrics={status.get('last_metrics')}"
+            )
+
+        if lower == "/pause":
+            pipeline.set_paused(True)
+            return "⏸️ Trading paused. Data collection is still running."
+
+        if lower == "/resume":
+            pipeline.set_paused(False)
+            return "▶️ Trading resumed."
+
+        if lower.startswith("/mode"):
+            parts = normalized.split()
+            if len(parts) == 1:
+                return f"Current mode: {pipeline.runtime_mode}"
+            requested_mode = parts[1].strip().lower()
+            return pipeline.request_mode_change(requested_mode)
+
+        if lower == "/positions":
+            positions = pipeline.store.get_open_positions_summary()
+            if not positions:
+                return "No open submitted positions."
+            lines = ["📦 Open Positions"]
+            for row in positions[:10]:
+                lines.append(
+                    f"{row['market_ticker']} side={str(row['side']).upper()} contracts={row['contracts']} avg={round(float(row['avg_price_cents']), 2)}c"
+                )
+            return "\n".join(lines)
+
+        if lower == "/orders":
+            orders = pipeline.store.get_recent_paper_orders(limit=10)
+            if not orders:
+                return "No recent paper orders."
+            lines = ["🧾 Recent Orders"]
+            for row in orders[:10]:
+                lines.append(
+                    f"{row['created_at']} {row['market_ticker']} {str(row['side']).upper()} x{row['count']} @ {row['limit_price_cents']}c -> {row['status']}"
+                )
+            return "\n".join(lines)
+
+        if lower == "/signals":
+            rows = pipeline.store.get_recent_signals(limit=10)
+            if not rows:
+                return "No recent signals."
+            lines = ["🧠 Recent Signals"]
+            for row in rows[:10]:
+                lines.append(
+                    f"{row['created_at']} {row['signal_type']} {row['market_ticker']} {row['direction']} edge={round(float(row['edge_bps'] or 0.0), 2)}bps conf={round(float(row['confidence'] or 0.0), 3)}"
+                )
+            return "\n".join(lines)
+
+        if lower.startswith("/accuracy"):
+            parts = normalized.split()
+            days = 30
+            if len(parts) >= 2:
+                try:
+                    days = max(1, int(parts[1]))
+                except ValueError:
+                    days = 30
+            report = generate_accuracy_report(pipeline.store, market_type="all", days=days)
+            return (
+                f"📈 Accuracy ({days}d)\n"
+                f"n_signals={report.n_signals}\n"
+                f"brier={report.brier_score}\n"
+                f"hit_rate={report.hit_rate}\n"
+                f"avg_pnl_per_contract={report.avg_pnl_per_contract}\n"
+                f"total_pnl={report.total_pnl}\n"
+                f"sharpe_proxy={report.sharpe_ratio}"
+            )
+
+        if lower == "/balance":
+            balance = pipeline.get_balance_snapshot()
+            if balance is None:
+                return "Balance unavailable for current mode."
+            return f"💵 Balance\n{balance}"
+
+        return None
+
+    def notify_operational_alerts(
+        self, now_utc: datetime, messages: list[str]
+    ) -> list[AlertEvent]:
+        if not self.is_enabled() or not messages:
+            return []
+        events: list[AlertEvent] = []
+        for message in messages:
+            status, metadata = self._send_message(message)
+            events.append(
+                AlertEvent(
+                    channel="telegram",
+                    event_type="operational_alert",
+                    market_ticker=None,
+                    message=message,
+                    status=status,
+                    metadata=metadata,
+                    created_at=now_utc,
+                )
+            )
         return events
 
     def _send_signal_digest(
@@ -175,6 +330,28 @@ class TelegramNotifier:
             metadata=metadata,
             created_at=now_utc,
         )
+
+    def _fetch_updates(self) -> list[dict[str, Any]]:
+        url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/getUpdates"
+        params = {"timeout": 0, "offset": self._updates_offset}
+        try:
+            response = self._session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException:
+            logger.warning("telegram_get_updates_failed", exc_info=True)
+            return []
+        if not isinstance(payload, dict):
+            return []
+        updates = payload.get("result", [])
+        if not isinstance(updates, list):
+            return []
+        for update in updates:
+            if isinstance(update, dict):
+                update_id = update.get("update_id")
+                if isinstance(update_id, int):
+                    self._updates_offset = max(self._updates_offset, update_id + 1)
+        return [update for update in updates if isinstance(update, dict)]
 
     def _send_message(self, message: str) -> tuple[str, dict[str, Any]]:
         url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}/sendMessage"

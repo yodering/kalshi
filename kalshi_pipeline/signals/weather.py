@@ -4,7 +4,13 @@ from datetime import datetime
 import re
 
 from ..config import Settings
-from ..models import Market, MarketSnapshot, SignalRecord, WeatherEnsembleSample
+from ..models import (
+    Market,
+    MarketSnapshot,
+    SignalRecord,
+    WeatherBracketProbability,
+    WeatherEnsembleSample,
+)
 
 
 def _normalize_probability(price: float | None) -> float | None:
@@ -49,7 +55,9 @@ def _parse_bracket_bounds(market: Market) -> tuple[float | None, float | None] |
         below_match = re.search(r"below\s+(-?\d+(?:\.\d+)?)", normalized)
         if below_match:
             return None, float(below_match.group(1))
-        above_match = re.search(r"(?:above|at least|or above|and above)\s+(-?\d+(?:\.\d+)?)", normalized)
+        above_match = re.search(
+            r"(?:above|at least|or above|and above)\s+(-?\d+(?:\.\d+)?)", normalized
+        )
         if above_match:
             return float(above_match.group(1)), None
         plus_match = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:\+|or\s+higher)", normalized)
@@ -94,6 +102,46 @@ def _direction(edge_bps: float | None, min_edge_bps: int) -> str:
     return "flat"
 
 
+def build_weather_probabilities(
+    markets: list[Market],
+    snapshots_by_ticker: dict[str, MarketSnapshot],
+    ensemble_samples: list[WeatherEnsembleSample],
+    *,
+    now_utc: datetime,
+) -> list[WeatherBracketProbability]:
+    if not ensemble_samples:
+        return []
+    relevant_markets = [market for market in markets if _is_weather_market(market)]
+    if not relevant_markets:
+        return []
+    target_date = ensemble_samples[0].target_date
+    rows: list[WeatherBracketProbability] = []
+    for market in relevant_markets:
+        bounds = _parse_bracket_bounds(market)
+        if bounds is None:
+            continue
+        model_prob = _probability_for_bounds(ensemble_samples, bounds[0], bounds[1])
+        if model_prob is None:
+            continue
+        snapshot = snapshots_by_ticker.get(market.ticker)
+        market_prob = _normalize_probability(snapshot.yes_price if snapshot else None)
+        edge = None if market_prob is None else (model_prob - market_prob)
+        rows.append(
+            WeatherBracketProbability(
+                computed_at=now_utc,
+                target_date=target_date,
+                ticker=market.ticker,
+                bracket_low=bounds[0],
+                bracket_high=bounds[1],
+                model_prob=round(model_prob, 6),
+                market_prob=round(market_prob, 6) if market_prob is not None else None,
+                edge=round(edge, 6) if edge is not None else None,
+                ensemble_count=len(ensemble_samples),
+            )
+        )
+    return rows
+
+
 def build_weather_signals(
     settings: Settings,
     markets: list[Market],
@@ -102,43 +150,45 @@ def build_weather_signals(
     *,
     now_utc: datetime,
 ) -> list[SignalRecord]:
-    if not ensemble_samples:
+    probability_rows = build_weather_probabilities(
+        markets=markets,
+        snapshots_by_ticker=snapshots_by_ticker,
+        ensemble_samples=ensemble_samples,
+        now_utc=now_utc,
+    )
+    if not probability_rows:
         return []
-    relevant_markets = [market for market in markets if _is_weather_market(market)]
+
+    sample_count = len(ensemble_samples)
+    sample_strength = min(1.0, sample_count / 60.0)
     signals: list[SignalRecord] = []
-    for market in relevant_markets:
-        bounds = _parse_bracket_bounds(market)
-        if bounds is None:
+    for row in probability_rows:
+        if row.market_prob is None or row.edge is None:
             continue
-        model_prob = _probability_for_bounds(ensemble_samples, bounds[0], bounds[1])
-        market_snapshot = snapshots_by_ticker.get(market.ticker)
-        market_prob = _normalize_probability(
-            market_snapshot.yes_price if market_snapshot is not None else None
-        )
-        if model_prob is None or market_prob is None:
-            continue
-        edge_bps = round((model_prob - market_prob) * 10000, 2)
+        edge_bps = round(row.edge * 10000, 2)
         direction = _direction(edge_bps, settings.signal_min_edge_bps)
         if direction == "flat" and not settings.signal_store_all:
             continue
-        confidence = min(1.0, abs(edge_bps) / max(settings.signal_min_edge_bps * 3, 1))
+        edge_strength = min(
+            1.0, abs(edge_bps) / max(float(settings.signal_min_edge_bps) * 3.0, 1.0)
+        )
+        confidence = round(max(0.0, min(1.0, sample_strength * edge_strength)), 4)
         signals.append(
             SignalRecord(
                 signal_type="weather",
-                market_ticker=market.ticker,
+                market_ticker=row.ticker,
                 direction=direction,
-                model_probability=round(model_prob, 6),
-                market_probability=round(market_prob, 6),
+                model_probability=row.model_prob,
+                market_probability=row.market_prob,
                 edge_bps=edge_bps,
-                confidence=round(confidence, 4),
+                confidence=confidence,
                 details={
-                    "lower_bound": bounds[0],
-                    "upper_bound": bounds[1],
-                    "sample_count": len(ensemble_samples),
-                    "target_date": str(ensemble_samples[0].target_date),
+                    "lower_bound": row.bracket_low,
+                    "upper_bound": row.bracket_high,
+                    "sample_count": sample_count,
+                    "target_date": str(row.target_date),
                 },
                 created_at=now_utc,
             )
         )
     return signals
-

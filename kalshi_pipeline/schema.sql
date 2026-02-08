@@ -42,6 +42,37 @@ CREATE TABLE IF NOT EXISTS weather_ensemble_samples (
 CREATE INDEX IF NOT EXISTS idx_weather_ensemble_target_date
 ON weather_ensemble_samples (target_date, collected_at DESC);
 
+CREATE TABLE IF NOT EXISTS weather_ensemble_forecasts (
+    id BIGSERIAL PRIMARY KEY,
+    collected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    target_date DATE NOT NULL,
+    model TEXT NOT NULL,
+    member_index INTEGER NOT NULL,
+    predicted_max_f DOUBLE PRECISION NOT NULL,
+    forecast_hour INTEGER NULL,
+    UNIQUE (collected_at, target_date, model, member_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_weather_ensemble_forecasts_target_date
+ON weather_ensemble_forecasts (target_date, collected_at DESC);
+
+CREATE TABLE IF NOT EXISTS weather_bracket_probs (
+    id BIGSERIAL PRIMARY KEY,
+    computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    target_date DATE NOT NULL,
+    ticker TEXT NOT NULL,
+    bracket_low DOUBLE PRECISION NULL,
+    bracket_high DOUBLE PRECISION NULL,
+    model_prob DOUBLE PRECISION NOT NULL,
+    market_prob DOUBLE PRECISION NULL,
+    edge DOUBLE PRECISION NULL,
+    ensemble_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (computed_at, ticker)
+);
+
+CREATE INDEX IF NOT EXISTS idx_weather_bracket_probs_target_date
+ON weather_bracket_probs (target_date, computed_at DESC);
+
 CREATE TABLE IF NOT EXISTS crypto_spot_ticks (
     id BIGSERIAL PRIMARY KEY,
     ts TIMESTAMPTZ NOT NULL,
@@ -96,6 +127,55 @@ ON paper_trade_orders (created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_paper_trade_orders_market_direction
 ON paper_trade_orders (market_ticker, direction, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS paper_trade_order_events (
+    id BIGSERIAL PRIMARY KEY,
+    order_id BIGINT NULL REFERENCES paper_trade_orders(id) ON DELETE CASCADE,
+    market_ticker TEXT NOT NULL,
+    external_order_id TEXT NULL,
+    status TEXT NOT NULL,
+    queue_position INTEGER NULL,
+    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    event_ts TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_trade_order_events_order_id
+ON paper_trade_order_events (order_id, event_ts DESC);
+
+CREATE TABLE IF NOT EXISTS market_resolutions (
+    ticker TEXT PRIMARY KEY,
+    series_ticker TEXT NULL,
+    event_ticker TEXT NULL,
+    market_type TEXT NOT NULL,
+    resolved_at TIMESTAMPTZ NULL,
+    result TEXT NULL,
+    actual_value DOUBLE PRECISION NULL,
+    resolution_source TEXT NOT NULL,
+    collected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_resolutions_type_resolved_at
+ON market_resolutions (market_type, resolved_at DESC);
+
+CREATE TABLE IF NOT EXISTS prediction_accuracy (
+    id BIGSERIAL PRIMARY KEY,
+    signal_id BIGINT NULL REFERENCES signals(id) ON DELETE SET NULL,
+    ticker TEXT NOT NULL,
+    signal_time TIMESTAMPTZ NOT NULL,
+    model_prob DOUBLE PRECISION NULL,
+    market_prob DOUBLE PRECISION NULL,
+    edge_bps DOUBLE PRECISION NULL,
+    actual_outcome BOOLEAN NULL,
+    pnl_per_contract DOUBLE PRECISION NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_accuracy_ticker
+ON prediction_accuracy (ticker, signal_time DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prediction_accuracy_signal_id_unique
+ON prediction_accuracy (signal_id)
+WHERE signal_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS alert_events (
     id BIGSERIAL PRIMARY KEY,

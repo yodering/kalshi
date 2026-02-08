@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-import statistics
+from datetime import datetime, timedelta
 
 from ..config import Settings
 from ..models import CryptoSpotTick, Market, MarketSnapshot, SignalRecord
+
+
+SOURCE_WEIGHTS: dict[str, float] = {
+    "coinbase": 0.30,
+    "kraken": 0.20,
+    "bitstamp": 0.15,
+    "binance": 0.25,
+}
 
 
 def _normalize_probability(price: float | None) -> float | None:
@@ -20,13 +27,6 @@ def _is_btc_market(market: Market) -> bool:
         return True
     series_ticker = str(market.raw_json.get("series_ticker", "")).upper()
     return series_ticker == "KXBTC15M"
-
-
-def _median_price(ticks: list[CryptoSpotTick]) -> float | None:
-    prices = [tick.price_usd for tick in ticks if tick.price_usd > 0]
-    if not prices:
-        return None
-    return float(statistics.median(prices))
 
 
 def _source_prices_at_timestamp(
@@ -51,35 +51,51 @@ def _latest_source_prices(
     return latest_ts, _source_prices_at_timestamp(ticks, latest_ts)
 
 
-def _median_from_sources(
-    source_prices: dict[str, float], ordered_sources: list[str]
-) -> tuple[float | None, list[str]]:
-    used_sources = [source for source in ordered_sources if source in source_prices]
-    if not used_sources:
-        return None, []
-    values = [source_prices[source] for source in used_sources]
-    return float(statistics.median(values)), used_sources
+def _weighted_fair_value(
+    source_prices: dict[str, float],
+) -> tuple[float | None, float, list[str], float]:
+    weighted_sum = 0.0
+    total_weight = 0.0
+    used_sources: list[str] = []
+    for source, price in source_prices.items():
+        if price <= 0:
+            continue
+        weight = SOURCE_WEIGHTS.get(source, 0.0)
+        if weight <= 0:
+            continue
+        weighted_sum += price * weight
+        total_weight += weight
+        used_sources.append(source)
+    if total_weight <= 0:
+        return None, 0.0, [], 0.0
+    fair_value = weighted_sum / total_weight
+    agreement = 1.0
+    if len(used_sources) >= 2 and fair_value > 0:
+        spread = max(source_prices[s] for s in used_sources) - min(
+            source_prices[s] for s in used_sources
+        )
+        spread_bps = (spread / fair_value) * 10000
+        agreement = max(0.0, 1.0 - min(1.0, spread_bps / 100.0))
+    elif len(used_sources) == 1:
+        agreement = 0.7
+    confidence = max(0.0, min(1.0, total_weight * agreement))
+    return fair_value, confidence, sorted(used_sources), agreement
 
 
-def _anchor_core_price(
-    ticks: list[CryptoSpotTick],
-    target_ts: datetime,
-    core_sources: list[str],
-    min_core_sources: int,
-) -> tuple[float | None, datetime | None, list[str]]:
+def _find_anchor_snapshot(
+    ticks: list[CryptoSpotTick], lookback_target: datetime
+) -> tuple[float | None, datetime | None, dict[str, float], float]:
     candidate_timestamps = sorted(
-        {tick.ts for tick in ticks if tick.ts <= target_ts},
+        {tick.ts for tick in ticks if tick.ts <= lookback_target},
         reverse=True,
     )
     for timestamp in candidate_timestamps:
         source_prices = _source_prices_at_timestamp(ticks, timestamp)
-        price, used_sources = _median_from_sources(source_prices, core_sources)
-        if price is None:
+        fair_value, confidence, _used, _agreement = _weighted_fair_value(source_prices)
+        if fair_value is None:
             continue
-        if len(used_sources) < min_core_sources:
-            continue
-        return price, timestamp, used_sources
-    return None, None, []
+        return fair_value, timestamp, source_prices, confidence
+    return None, None, {}, 0.0
 
 
 def _direction(edge_bps: float | None, min_edge_bps: int) -> str:
@@ -104,47 +120,37 @@ def build_btc_signals(
     if not current_ticks and not recent_ticks:
         return []
 
-    # Prefer fresh ticks from this run; fall back to latest from DB history.
     active_ticks = current_ticks if current_ticks else recent_ticks
-    latest_tick_ts, latest_source_prices = _latest_source_prices(active_ticks)
-    if latest_tick_ts is None or not latest_source_prices:
+    latest_ts, latest_source_prices = _latest_source_prices(active_ticks)
+    if latest_ts is None or not latest_source_prices:
         return []
 
-    latest_price, latest_core_sources = _median_from_sources(
-        latest_source_prices, settings.btc_core_sources
+    latest_fair_value, latest_confidence, latest_used_sources, agreement = _weighted_fair_value(
+        latest_source_prices
     )
-    if latest_price is None:
-        return []
-    if len(latest_core_sources) < settings.btc_min_core_sources:
+    if latest_fair_value is None:
         return []
 
     lookback_target = now_utc - timedelta(minutes=settings.btc_momentum_lookback_minutes)
-    anchor_price, anchor_ts, anchor_core_sources = _anchor_core_price(
-        recent_ticks,
-        lookback_target,
-        settings.btc_core_sources,
-        settings.btc_min_core_sources,
+    anchor_fair_value, anchor_ts, anchor_source_prices, anchor_confidence = _find_anchor_snapshot(
+        recent_ticks, lookback_target
     )
-    if anchor_price is None:
-        anchor_price = latest_price
-        anchor_ts = latest_tick_ts
-        anchor_core_sources = latest_core_sources
+    if anchor_fair_value is None:
+        anchor_fair_value = latest_fair_value
+        anchor_ts = latest_ts
+        anchor_source_prices = latest_source_prices
+        anchor_confidence = latest_confidence
 
-    momentum_bps = ((latest_price / anchor_price) - 1.0) * 10000 if anchor_price else 0.0
+    momentum_bps = (
+        ((latest_fair_value / anchor_fair_value) - 1.0) * 10000
+        if anchor_fair_value
+        else 0.0
+    )
     fair_shift = max(-0.35, min(0.35, momentum_bps / 800))
     fair_yes_prob = max(0.01, min(0.99, 0.5 + fair_shift))
-
-    prices_this_tick = [latest_source_prices[source] for source in latest_core_sources]
-    cross_source_spread_bps = 0.0
-    if len(prices_this_tick) >= 2 and latest_price > 0:
-        cross_source_spread_bps = ((max(prices_this_tick) - min(prices_this_tick)) / latest_price) * 10000
-
-    binance_basis_bps = None
-    binance_price = latest_source_prices.get("binance")
-    if binance_price is not None and latest_price > 0:
-        binance_basis_bps = ((binance_price - latest_price) / latest_price) * 10000
-
-    all_sources_observed = sorted(latest_source_prices.keys())
+    missing_sources = sorted(
+        source for source in settings.btc_enabled_sources if source not in latest_source_prices
+    )
 
     signals: list[SignalRecord] = []
     for market in markets:
@@ -158,7 +164,7 @@ def build_btc_signals(
         direction = _direction(edge_bps, settings.signal_min_edge_bps)
         if direction == "flat" and not settings.signal_store_all:
             continue
-        confidence = min(1.0, abs(edge_bps) / max(settings.signal_min_edge_bps * 3, 1))
+        confidence = max(0.0, min(1.0, (latest_confidence + anchor_confidence) / 2.0))
         signals.append(
             SignalRecord(
                 signal_type="btc",
@@ -169,19 +175,23 @@ def build_btc_signals(
                 edge_bps=edge_bps,
                 confidence=round(confidence, 4),
                 details={
-                    "latest_spot": round(latest_price, 4),
-                    "anchor_spot": round(anchor_price, 4),
-                    "latest_tick_ts": latest_tick_ts.isoformat(),
+                    "latest_fair_value": round(latest_fair_value, 4),
+                    "anchor_fair_value": round(anchor_fair_value, 4),
+                    "latest_tick_ts": latest_ts.isoformat(),
                     "anchor_tick_ts": anchor_ts.isoformat() if anchor_ts else None,
-                    "core_sources_used_latest": latest_core_sources,
-                    "core_sources_used_anchor": anchor_core_sources,
-                    "all_sources_observed": all_sources_observed,
                     "momentum_bps": round(momentum_bps, 2),
-                    "cross_source_spread_bps": round(cross_source_spread_bps, 2),
-                    "binance_basis_bps": round(binance_basis_bps, 2)
-                    if binance_basis_bps is not None
-                    else None,
-                    "lookback_minutes": settings.btc_momentum_lookback_minutes,
+                    "source_prices_latest": {
+                        k: round(v, 4) for k, v in latest_source_prices.items()
+                    },
+                    "source_prices_anchor": {
+                        k: round(v, 4) for k, v in anchor_source_prices.items()
+                    },
+                    "sources_used_latest": latest_used_sources,
+                    "missing_sources_latest": missing_sources,
+                    "source_weight_coverage": round(
+                        sum(SOURCE_WEIGHTS.get(source, 0.0) for source in latest_used_sources), 4
+                    ),
+                    "agreement_factor": round(agreement, 4),
                 },
                 created_at=now_utc,
             )

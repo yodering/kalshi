@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import sys
@@ -18,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("discover-targets", help="List markets matched by TARGET_* filters")
     subparsers.add_parser("run-once", help="Run one polling cycle")
     subparsers.add_parser("run", help="Run continuous polling loop")
+    subparsers.add_parser("run-async", help="Run async polling + websocket feeds")
     return parser
 
 
@@ -34,12 +36,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = Settings.from_env()
     logger.info(
-        "startup bot_mode=%s kalshi_key_profile=%s kalshi_stub_mode=%s kalshi_base_url=%s kalshi_auth_for_public=%s database_source=%s database_target=%s target_groups=%s target_tickers=%s target_series=%s auto_select_live_contracts=%s store_raw_json=%s weather_enabled=%s btc_enabled=%s btc_enabled_sources=%s btc_core_sources=%s btc_min_core_sources=%s trading_profile=%s paper_trading_enabled=%s paper_trading_mode=%s paper_trading_base_url=%s telegram_enabled=%s signal_min_edge_bps=%s",
+        "startup bot_mode=%s kalshi_key_profile=%s kalshi_stub_mode=%s kalshi_base_url=%s kalshi_auth_for_public=%s websocket_enabled=%s database_source=%s database_target=%s target_groups=%s target_tickers=%s target_series=%s auto_select_live_contracts=%s store_raw_json=%s weather_enabled=%s btc_enabled=%s btc_enabled_sources=%s btc_core_sources=%s btc_min_core_sources=%s trading_profile=%s paper_trading_enabled=%s paper_trading_mode=%s paper_trading_base_url=%s telegram_enabled=%s signal_min_edge_bps=%s",
         settings.bot_mode,
         settings.kalshi_key_profile,
         settings.kalshi_stub_mode,
         settings.kalshi_base_url,
         settings.kalshi_use_auth_for_public_data,
+        settings.websocket_enabled,
         settings.database_url_source,
         redact_database_url(settings.database_url),
         ";".join(settings.target_market_query_groups),
@@ -91,6 +94,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "run-once":
             print(json.dumps(pipeline.run_once(), indent=2))
+            return 0
+
+        if args.command == "run-async" or (args.command == "run" and settings.websocket_enabled):
+            from .async_runtime import AsyncRuntime
+
+            runtime = AsyncRuntime(settings=settings, pipeline=pipeline, client=client)
+            asyncio.run(runtime.run())
             return 0
 
         if args.command == "run":

@@ -118,6 +118,27 @@ class KalshiClient:
             base_url_override=base_url,
         )
 
+    def get_order(self, order_id: str, *, base_url: str | None = None) -> dict[str, Any]:
+        return self._request_json(
+            "GET",
+            f"/trade-api/v2/portfolio/orders/{order_id}",
+            require_auth=True,
+            base_url_override=base_url,
+        )
+
+    def get_queue_positions(
+        self, market_tickers: list[str], *, base_url: str | None = None
+    ) -> dict[str, Any]:
+        if not market_tickers:
+            return {}
+        return self._request_json(
+            "GET",
+            "/trade-api/v2/portfolio/orders/queue_positions",
+            require_auth=True,
+            params={"market_tickers": ",".join(market_tickers)},
+            base_url_override=base_url,
+        )
+
     def list_markets(self, limit: int) -> list[Market]:
         if self.settings.kalshi_stub_mode:
             return generate_markets(limit)

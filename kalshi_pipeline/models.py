@@ -83,3 +83,42 @@ class AlertEvent:
     status: str
     metadata: dict[str, Any]
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class WeatherBracketProbability:
+    computed_at: datetime
+    target_date: date
+    ticker: str
+    bracket_low: float | None
+    bracket_high: float | None
+    model_prob: float
+    market_prob: float | None
+    edge: float | None
+    ensemble_count: int
+
+
+@dataclass(frozen=True)
+class MarketResolution:
+    ticker: str
+    series_ticker: str | None
+    event_ticker: str | None
+    market_type: str
+    resolved_at: datetime | None
+    result: str | None
+    actual_value: float | None
+    resolution_source: str
+    collected_at: datetime
+
+
+@dataclass(frozen=True)
+class PredictionAccuracy:
+    signal_id: int | None
+    ticker: str
+    signal_time: datetime
+    model_prob: float | None
+    market_prob: float | None
+    edge_bps: float | None
+    actual_outcome: bool | None
+    pnl_per_contract: float | None
+    created_at: datetime
