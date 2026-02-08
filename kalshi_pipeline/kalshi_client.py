@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any
+import uuid
 from urllib.parse import urlsplit
 
 try:
@@ -103,10 +104,7 @@ class KalshiClient:
             "side": normalized_side,
             "count": int(count),
             "type": "limit",
-            "client_order_id": (
-                f"bot-{ticker.lower().replace('-', '')[:18]}-"
-                f"{normalized_side}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-            ),
+            "client_order_id": str(uuid.uuid4()),
         }
         if normalized_side == "yes":
             payload["yes_price"] = int(price_cents)

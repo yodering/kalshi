@@ -138,9 +138,10 @@ class PaperTradingEngine:
                     reason = str(exc)
                     stats["paper_orders_failed"] += 1
                     logger.exception(
-                        "paper_trade_submit_failed ticker=%s side=%s",
+                        "paper_trade_submit_failed ticker=%s side=%s reason=%s",
                         signal.market_ticker,
                         side,
+                        reason,
                     )
             else:
                 reason = "simulation_only"

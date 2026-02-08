@@ -98,8 +98,14 @@ class TelegramNotifier:
             f"orders={len(orders)} submitted={submitted} simulated={simulated} failed={failed}",
         ]
         for order in orders[:5]:
+            reason_suffix = ""
+            if order.status == "failed" and order.reason:
+                reason_text = order.reason.replace("\n", " ").strip()
+                if len(reason_text) > 180:
+                    reason_text = f"{reason_text[:177]}..."
+                reason_suffix = f" reason={reason_text}"
             lines.append(
-                f"{order.market_ticker} {order.direction} side={order.side} count={order.count} price={order.limit_price_cents} status={order.status}"
+                f"{order.market_ticker} {order.direction} side={order.side} count={order.count} price={order.limit_price_cents} status={order.status}{reason_suffix}"
             )
         message = "\n".join(lines)
         status, metadata = self._send_message(message)
