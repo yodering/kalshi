@@ -126,6 +126,34 @@ class KalshiClient:
             base_url_override=base_url,
         )
 
+    def cancel_order(self, order_id: str, *, base_url: str | None = None) -> dict[str, Any]:
+        attempts = [
+            ("POST", f"/trade-api/v2/portfolio/orders/{order_id}/cancel"),
+            ("DELETE", f"/trade-api/v2/portfolio/orders/{order_id}"),
+        ]
+        last_exc: Exception | None = None
+        for method, path in attempts:
+            try:
+                return self._request_json(
+                    method,
+                    path,
+                    require_auth=True,
+                    base_url_override=base_url,
+                )
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                # Try alternate path when endpoint/method is unsupported.
+                if status in {404, 405}:
+                    last_exc = exc
+                    continue
+                raise
+            except requests.RequestException as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        return {}
+
     def get_queue_positions(
         self, market_tickers: list[str], *, base_url: str | None = None
     ) -> dict[str, Any]:

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import logging
 import re
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 NWS_CLI_NYC_URL = (
     "https://forecast.weather.gov/product.php?site=OKX&product=CLI&issuedby=NYC"
 )
+NYC_TZ = ZoneInfo("America/New_York")
 
 
 def fetch_nws_cli_nyc_max_temp(
@@ -64,6 +66,115 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _parse_kxhighny_target_date(ticker: str) -> date | None:
+    match = re.search(r"KXHIGHNY-(\d{2}[A-Z]{3}\d{2})-", ticker.upper())
+    if not match:
+        return None
+    token = match.group(1)
+    try:
+        return datetime.strptime(token, "%y%b%d").date()
+    except ValueError:
+        return None
+
+
+def _as_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _weather_bounds_from_market_row(row: dict[str, Any]) -> tuple[float | None, float | None] | None:
+    floor = _as_float(row.get("floor_strike") or row.get("floor"))
+    cap = _as_float(row.get("cap_strike") or row.get("cap"))
+    if floor is not None or cap is not None:
+        return floor, cap
+
+    text_candidates = [
+        str(row.get("subtitle", "")),
+        str(row.get("yes_sub_title", "")),
+        str(row.get("title", "")),
+    ]
+    for raw_text in text_candidates:
+        text = raw_text.lower()
+        below_match = re.search(r"below\s+(-?\d+(?:\.\d+)?)", text)
+        if below_match:
+            return None, float(below_match.group(1))
+        above_match = re.search(
+            r"(?:above|at least|or above|and above)\s+(-?\d+(?:\.\d+)?)",
+            text,
+        )
+        if above_match:
+            return float(above_match.group(1)), None
+        plus_match = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:\+|or\s+higher)", text)
+        if plus_match:
+            return float(plus_match.group(1)), None
+        range_match = re.search(
+            r"(-?\d+(?:\.\d+)?)\s*(?:to|through|-|–)\s*(-?\d+(?:\.\d+)?)",
+            text,
+        )
+        if range_match:
+            lower = float(range_match.group(1))
+            upper = float(range_match.group(2))
+            if lower.is_integer() and upper.is_integer():
+                return lower, upper + 1.0
+            return lower, upper
+    return None
+
+
+def _result_for_bounds(temp_f: float, bounds: tuple[float | None, float | None] | None) -> str | None:
+    if bounds is None:
+        return None
+    lower, upper = bounds
+    if lower is not None and temp_f < lower:
+        return "no"
+    if upper is not None and temp_f >= upper:
+        return "no"
+    return "yes"
+
+
+def _enrich_weather_rows_with_nws(
+    rows: list[MarketResolution],
+    *,
+    weather_bounds: dict[str, tuple[float | None, float | None] | None],
+    now_utc: datetime,
+) -> None:
+    has_weather = any(row.market_type == "weather" for row in rows)
+    if not has_weather:
+        return
+    try:
+        nws_payload = fetch_nws_cli_nyc_max_temp()
+    except requests.RequestException:
+        logger.warning("nws_cli_fetch_failed", exc_info=True)
+        return
+    if not nws_payload:
+        return
+    max_temp_f = _as_float(nws_payload.get("max_temp_f"))
+    if max_temp_f is None:
+        return
+    today_nyc = now_utc.astimezone(NYC_TZ).date()
+    for idx, row in enumerate(rows):
+        if row.market_type != "weather":
+            continue
+        market_date = _parse_kxhighny_target_date(row.ticker)
+        if market_date is None or market_date != today_nyc:
+            continue
+        inferred_result = _result_for_bounds(max_temp_f, weather_bounds.get(row.ticker))
+        rows[idx] = MarketResolution(
+            ticker=row.ticker,
+            series_ticker=row.series_ticker,
+            event_ticker=row.event_ticker,
+            market_type=row.market_type,
+            resolved_at=row.resolved_at,
+            result=row.result if row.result else inferred_result,
+            actual_value=max_temp_f,
+            resolution_source="kalshi_api+nws_cli",
+            collected_at=row.collected_at,
+        )
 
 
 def _discover_resolution_candidates(
@@ -148,6 +259,7 @@ def collect_market_resolutions(
     max_candidates: int = 250,
 ) -> list[MarketResolution]:
     collected_at = now_utc or datetime.now(timezone.utc)
+    weather_bounds_by_ticker: dict[str, tuple[float | None, float | None] | None] = {}
     candidates = _discover_resolution_candidates(
         client,
         base_url_override=base_url_override,
@@ -194,6 +306,13 @@ def collect_market_resolutions(
                 continue
 
         series_ticker = market.get("series_ticker")
+        inferred_type = _infer_market_type(
+            str(series_ticker) if series_ticker else None, str(ticker)
+        )
+        if inferred_type == "weather":
+            weather_bounds_by_ticker[str(market.get("ticker") or ticker)] = (
+                _weather_bounds_from_market_row(market)
+            )
         rows.append(
             MarketResolution(
                 ticker=str(market.get("ticker") or ticker),
@@ -201,9 +320,7 @@ def collect_market_resolutions(
                 event_ticker=str(market.get("event_ticker"))
                 if market.get("event_ticker")
                 else None,
-                market_type=_infer_market_type(
-                    str(series_ticker) if series_ticker else None, str(ticker)
-                ),
+                market_type=inferred_type,
                 resolved_at=resolved_at,
                 result=str(result).lower() if result is not None else None,
                 actual_value=actual_value,
@@ -211,4 +328,9 @@ def collect_market_resolutions(
                 collected_at=collected_at,
             )
         )
+    _enrich_weather_rows_with_nws(
+        rows,
+        weather_bounds=weather_bounds_by_ticker,
+        now_utc=collected_at,
+    )
     return rows

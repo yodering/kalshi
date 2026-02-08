@@ -36,6 +36,12 @@ def _format_prob(value: float | None) -> str:
     return f"{round(value * 100, 1)}%"
 
 
+def _format_pct(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{round(value * 100, 1)}%"
+
+
 def _signal_icon(signal_type: str) -> str:
     signal_type_norm = signal_type.lower()
     if signal_type_norm == "weather":
@@ -211,10 +217,35 @@ class TelegramNotifier:
                 f"📈 Accuracy ({days}d)\n"
                 f"n_signals={report.n_signals}\n"
                 f"brier={report.brier_score}\n"
+                f"market_brier={report.market_brier_score}\n"
+                f"log_loss={report.log_loss}\n"
+                f"edge_reliability={report.edge_reliability}\n"
                 f"hit_rate={report.hit_rate}\n"
                 f"avg_pnl_per_contract={report.avg_pnl_per_contract}\n"
                 f"total_pnl={report.total_pnl}\n"
                 f"sharpe_proxy={report.sharpe_ratio}"
+            )
+
+        if lower.startswith("/fills"):
+            parts = normalized.split()
+            days = 30
+            if len(parts) >= 2:
+                try:
+                    days = max(1, int(parts[1]))
+                except ValueError:
+                    days = 30
+            metrics = pipeline.store.get_paper_fill_metrics(days=days)
+            avg_fill = metrics["avg_fill_minutes"]
+            avg_fill_text = "n/a" if avg_fill is None else str(round(float(avg_fill), 2))
+            return (
+                f"📦 Fill Metrics ({days}d)\n"
+                f"total_orders={metrics['total_orders']}\n"
+                f"filled_orders={metrics['filled_orders']}\n"
+                f"open_orders={metrics['open_orders']}\n"
+                f"canceled_orders={metrics['canceled_orders']}\n"
+                f"failed_orders={metrics['failed_orders']}\n"
+                f"fill_rate={_format_pct(metrics['fill_rate'])}\n"
+                f"avg_fill_minutes={avg_fill_text}"
             )
 
         if lower == "/balance":

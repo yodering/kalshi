@@ -412,6 +412,10 @@ class Settings:
     paper_trade_max_price_cents: int
     paper_trade_maker_only: bool
     paper_trade_enable_arbitrage: bool
+    paper_trade_enable_queue_management: bool
+    paper_trade_queue_max_depth: int
+    paper_trade_queue_stale_minutes: int
+    paper_trade_reprice_cooldown_minutes: int
     paper_trade_sizing_mode: str
     kelly_fraction_scale: float
     paper_trade_max_position_dollars: float
@@ -513,6 +517,24 @@ class Settings:
             paper_trade_max_price_cents = 99
         if paper_trade_min_price_cents > paper_trade_max_price_cents:
             paper_trade_min_price_cents = min(paper_trade_max_price_cents, 5)
+
+        paper_trade_queue_max_depth = _as_int(
+            os.getenv("PAPER_TRADE_QUEUE_MAX_DEPTH"), 50
+        )
+        if paper_trade_queue_max_depth < 1:
+            paper_trade_queue_max_depth = 1
+
+        paper_trade_queue_stale_minutes = _as_int(
+            os.getenv("PAPER_TRADE_QUEUE_STALE_MINUTES"), 10
+        )
+        if paper_trade_queue_stale_minutes < 1:
+            paper_trade_queue_stale_minutes = 1
+
+        paper_trade_reprice_cooldown_minutes = _as_int(
+            os.getenv("PAPER_TRADE_REPRICE_COOLDOWN_MINUTES"), 20
+        )
+        if paper_trade_reprice_cooldown_minutes < 1:
+            paper_trade_reprice_cooldown_minutes = 1
 
         paper_trade_min_confidence = _as_float(
             os.getenv("PAPER_TRADE_MIN_CONFIDENCE"),
@@ -636,6 +658,12 @@ class Settings:
             paper_trade_enable_arbitrage=_as_bool(
                 os.getenv("PAPER_TRADE_ENABLE_ARBITRAGE"), True
             ),
+            paper_trade_enable_queue_management=_as_bool(
+                os.getenv("PAPER_TRADE_ENABLE_QUEUE_MANAGEMENT"), True
+            ),
+            paper_trade_queue_max_depth=paper_trade_queue_max_depth,
+            paper_trade_queue_stale_minutes=paper_trade_queue_stale_minutes,
+            paper_trade_reprice_cooldown_minutes=paper_trade_reprice_cooldown_minutes,
             paper_trade_sizing_mode=_as_paper_trade_sizing_mode(
                 os.getenv("PAPER_TRADE_SIZING_MODE")
             ),

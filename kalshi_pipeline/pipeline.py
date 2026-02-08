@@ -133,10 +133,31 @@ class DataPipeline:
     def run_once(self) -> dict[str, int]:
         now = datetime.now(timezone.utc)
         markets = self.client.list_markets(self.settings.market_limit)
+        resolution_rows_upserted = 0
+        prediction_accuracy_rows_materialized = 0
         if not markets:
             logger.warning(
                 "No markets matched current target filters. Check TARGET_* env settings."
             )
+            try:
+                resolution_rows = collect_market_resolutions(
+                    self.client,
+                    [],
+                    target_series_tickers=self.settings.target_series_tickers,
+                    base_url_override=self.settings.paper_trading_base_url
+                    if self.settings.paper_trading_mode == "kalshi_demo"
+                    else None,
+                    now_utc=now,
+                )
+                if resolution_rows:
+                    resolution_rows_upserted = self.store.upsert_market_resolutions(
+                        resolution_rows
+                    )
+                prediction_accuracy_rows_materialized = (
+                    self.store.materialize_prediction_accuracy()
+                )
+            except Exception:
+                logger.exception("resolution_tracking_failed")
             return {
                 "markets_seen": 0,
                 "current_snapshots_inserted": 0,
@@ -155,7 +176,18 @@ class DataPipeline:
                 "paper_orders_failed": 0,
                 "paper_orders_skipped": 0,
                 "paper_orders_recorded": 0,
+                "paper_order_events_inserted": 0,
+                "paper_orders_status_updates": 0,
+                "paper_orders_filled": 0,
+                "paper_orders_canceled": 0,
+                "paper_orders_failed_reconcile": 0,
+                "paper_orders_repriced": 0,
+                "paper_orders_reprice_recorded": 0,
+                "paper_orders_reprice_failed": 0,
+                "paper_orders_queue_alerted": 0,
                 "alert_events_inserted": 0,
+                "resolutions_upserted": resolution_rows_upserted,
+                "prediction_accuracy_materialized": prediction_accuracy_rows_materialized,
             }
         logger.info("target_markets %s", ",".join(market.ticker for market in markets))
         ticker_to_id = self.store.upsert_markets(markets)
@@ -265,8 +297,8 @@ class DataPipeline:
                 now_utc=now,
             )
             if resolution_rows:
-                self.store.upsert_market_resolutions(resolution_rows)
-            self.store.materialize_prediction_accuracy()
+                resolution_rows_upserted = self.store.upsert_market_resolutions(resolution_rows)
+            prediction_accuracy_rows_materialized = self.store.materialize_prediction_accuracy()
         except Exception:
             logger.exception("resolution_tracking_failed")
 
@@ -278,8 +310,18 @@ class DataPipeline:
             "paper_orders_failed": 0,
             "paper_orders_skipped": 0,
             "paper_orders_recorded": 0,
+            "paper_order_events_inserted": 0,
+            "paper_orders_status_updates": 0,
+            "paper_orders_filled": 0,
+            "paper_orders_canceled": 0,
+            "paper_orders_failed_reconcile": 0,
+            "paper_orders_repriced": 0,
+            "paper_orders_reprice_recorded": 0,
+            "paper_orders_reprice_failed": 0,
+            "paper_orders_queue_alerted": 0,
         }
         paper_orders = []
+        repriced_orders = []
         try:
             if self.paused or not self.runtime_auto_trading_enabled:
                 logger.info(
@@ -291,6 +333,18 @@ class DataPipeline:
                 paper_orders, paper_stats = self.paper_trader.execute(
                     all_signals, snapshots_by_ticker, now
                 )
+
+            if self.settings.paper_trading_mode == "kalshi_demo":
+                repriced_orders, reconcile_stats = self.paper_trader.reconcile_open_orders(
+                    signals=all_signals,
+                    snapshots_by_ticker=snapshots_by_ticker,
+                    now_utc=now,
+                    allow_reprice=(not self.paused and self.runtime_auto_trading_enabled),
+                )
+                if repriced_orders:
+                    paper_orders.extend(repriced_orders)
+                for key, value in reconcile_stats.items():
+                    paper_stats[key] = paper_stats.get(key, 0) + value
         except Exception:
             logger.exception("paper_trading_failed")
 
@@ -336,6 +390,8 @@ class DataPipeline:
             "signals_generated": generated_signals,
             "signals_inserted": inserted_signals,
             "alert_events_inserted": alert_events_inserted,
+            "resolutions_upserted": resolution_rows_upserted,
+            "prediction_accuracy_materialized": prediction_accuracy_rows_materialized,
         }
         stats.update(paper_stats)
         self.last_poll_at = now

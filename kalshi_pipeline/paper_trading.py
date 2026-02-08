@@ -117,6 +117,93 @@ def _find_arbitrage(book: dict[str, int | None]) -> dict[str, int] | None:
     }
 
 
+def _normalize_order_status(raw_status: object) -> str:
+    status = str(raw_status or "").strip().lower()
+    if not status:
+        return "submitted"
+    if status in {"resting", "open", "pending", "submitted"}:
+        return "submitted"
+    if status in {"partially_filled", "partially-filled"}:
+        return "partially_filled"
+    if status in {"filled", "executed", "complete", "completed", "matched"}:
+        return "filled"
+    if status in {"canceled", "cancelled", "expired", "voided"}:
+        return "canceled"
+    if status in {"failed", "rejected", "error"}:
+        return "failed"
+    return status
+
+
+def _extract_order_status(payload: dict[str, Any]) -> str:
+    candidates = [
+        payload.get("status"),
+        payload.get("order_status"),
+    ]
+    order_obj = payload.get("order")
+    if isinstance(order_obj, dict):
+        candidates.extend([order_obj.get("status"), order_obj.get("order_status")])
+    for candidate in candidates:
+        normalized = _normalize_order_status(candidate)
+        if normalized:
+            return normalized
+    return "submitted"
+
+
+def _as_int(value: object) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_queue_positions(payload: dict[str, Any]) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+
+    def _record(key: object, value: object) -> None:
+        if key is None:
+            return
+        position = _as_int(value)
+        if position is None:
+            return
+        text = str(key).strip()
+        if not text:
+            return
+        mapping[text] = position
+
+    def _visit_node(node: object, parent_key: str | None = None) -> None:
+        if isinstance(node, dict):
+            queue_position = node.get("queue_position")
+            if queue_position is None:
+                queue_position = node.get("position")
+            if queue_position is not None:
+                aliases = [
+                    parent_key,
+                    node.get("order_id"),
+                    node.get("external_order_id"),
+                    node.get("market_ticker"),
+                    node.get("ticker"),
+                ]
+                for alias in aliases:
+                    _record(alias, queue_position)
+            for key, value in node.items():
+                if isinstance(value, (dict, list)):
+                    _visit_node(value, str(key))
+                else:
+                    if key in {"queue_position", "position"}:
+                        _record(parent_key or key, value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit_node(item, parent_key)
+
+    root = payload.get("queue_positions") if isinstance(payload, dict) else None
+    if root is None:
+        root = payload
+    _visit_node(root)
+    return mapping
+
+
 class PaperTradingEngine:
     def __init__(self, settings: Settings, client: KalshiClient, store: PostgresStore) -> None:
         self.settings = settings
@@ -325,3 +412,278 @@ class PaperTradingEngine:
         if orders:
             stats["paper_orders_recorded"] = self.store.insert_paper_trade_orders(orders)
         return orders, stats
+
+    def reconcile_open_orders(
+        self,
+        *,
+        signals: list[SignalRecord],
+        snapshots_by_ticker: dict[str, MarketSnapshot],
+        now_utc: datetime,
+        allow_reprice: bool,
+    ) -> tuple[list[PaperTradeOrder], dict[str, int]]:
+        stats = {
+            "paper_order_events_inserted": 0,
+            "paper_orders_status_updates": 0,
+            "paper_orders_filled": 0,
+            "paper_orders_canceled": 0,
+            "paper_orders_failed_reconcile": 0,
+            "paper_orders_repriced": 0,
+            "paper_orders_reprice_recorded": 0,
+            "paper_orders_reprice_failed": 0,
+            "paper_orders_queue_alerted": 0,
+        }
+        if self.settings.paper_trading_mode != "kalshi_demo":
+            return [], stats
+        if not self.settings.paper_trade_enable_queue_management:
+            return [], stats
+
+        active_orders = self.store.get_submitted_paper_orders(
+            limit=250,
+            since_ts=now_utc - timedelta(hours=24),
+        )
+        if not active_orders:
+            return [], stats
+
+        order_ids = [int(order["id"]) for order in active_orders]
+        latest_events = self.store.get_latest_order_events(order_ids)
+        market_tickers = sorted(
+            {str(order["market_ticker"]) for order in active_orders if order.get("market_ticker")}
+        )
+
+        signal_by_ticker: dict[str, SignalRecord] = {}
+        for signal in sorted(signals, key=lambda row: abs(row.edge_bps or 0.0), reverse=True):
+            ticker = signal.market_ticker
+            if ticker is None:
+                continue
+            if ticker in signal_by_ticker:
+                continue
+            signal_by_ticker[ticker] = signal
+
+        repriced_orders: list[PaperTradeOrder] = []
+        still_submitted: list[dict[str, object]] = []
+        for order in active_orders:
+            order_id = int(order["id"])
+            external_order_id = str(order.get("external_order_id") or "").strip()
+            if not external_order_id:
+                continue
+            ticker = str(order.get("market_ticker") or "").strip()
+            if not ticker:
+                continue
+
+            try:
+                payload = self.client.get_order(
+                    external_order_id,
+                    base_url=self.settings.paper_trading_base_url,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "paper_trade_order_status_check_failed order_id=%s external_order_id=%s",
+                    order_id,
+                    external_order_id,
+                    exc_info=True,
+                )
+                self.store.insert_order_event(
+                    order_id=order_id,
+                    market_ticker=ticker,
+                    external_order_id=external_order_id,
+                    status="status_check_failed",
+                    event_ts=now_utc,
+                    details={"reason": str(exc)},
+                )
+                stats["paper_order_events_inserted"] += 1
+                continue
+
+            normalized_status = _extract_order_status(payload)
+            last_event = latest_events.get(order_id, {})
+            last_status = str(last_event.get("status") or "")
+            is_open_status = normalized_status in {"submitted", "partially_filled"}
+            if not is_open_status:
+                updated = self.store.update_paper_trade_order_status(
+                    order_id=order_id,
+                    status=normalized_status,
+                    reason=None,
+                    response_payload=payload if isinstance(payload, dict) else {},
+                )
+                if updated:
+                    stats["paper_orders_status_updates"] += 1
+                if normalized_status == "filled":
+                    stats["paper_orders_filled"] += 1
+                elif normalized_status == "canceled":
+                    stats["paper_orders_canceled"] += 1
+                elif normalized_status == "failed":
+                    stats["paper_orders_failed_reconcile"] += 1
+                if last_status != normalized_status:
+                    self.store.insert_order_event(
+                        order_id=order_id,
+                        market_ticker=ticker,
+                        external_order_id=external_order_id,
+                        status=normalized_status,
+                        event_ts=now_utc,
+                        details={"status_payload": payload if isinstance(payload, dict) else {}},
+                    )
+                    stats["paper_order_events_inserted"] += 1
+                continue
+
+            if normalized_status == "partially_filled":
+                updated = self.store.update_paper_trade_order_status(
+                    order_id=order_id,
+                    status=normalized_status,
+                    reason=None,
+                    response_payload=payload if isinstance(payload, dict) else {},
+                )
+                if updated:
+                    stats["paper_orders_status_updates"] += 1
+
+            if last_status != normalized_status:
+                self.store.insert_order_event(
+                    order_id=order_id,
+                    market_ticker=ticker,
+                    external_order_id=external_order_id,
+                    status=normalized_status,
+                    event_ts=now_utc,
+                    details={"status_payload": payload if isinstance(payload, dict) else {}},
+                )
+                stats["paper_order_events_inserted"] += 1
+
+            still_submitted.append(order)
+
+        if not still_submitted:
+            return repriced_orders, stats
+
+        queue_positions: dict[str, int] = {}
+        if market_tickers:
+            try:
+                queue_payload = self.client.get_queue_positions(
+                    market_tickers,
+                    base_url=self.settings.paper_trading_base_url,
+                )
+                if isinstance(queue_payload, dict):
+                    queue_positions = _extract_queue_positions(queue_payload)
+            except Exception:
+                logger.warning("paper_trade_queue_positions_failed", exc_info=True)
+
+        reprice_since = now_utc - timedelta(
+            minutes=self.settings.paper_trade_reprice_cooldown_minutes
+        )
+        stale_cutoff = now_utc - timedelta(minutes=self.settings.paper_trade_queue_stale_minutes)
+        for order in still_submitted:
+            order_id = int(order["id"])
+            ticker = str(order.get("market_ticker") or "").strip()
+            external_order_id = str(order.get("external_order_id") or "").strip()
+            side = str(order.get("side") or "").lower()
+            direction = str(order.get("direction") or "")
+            order_created_at = order.get("created_at")
+            if not ticker or not external_order_id:
+                continue
+            queue_position = queue_positions.get(external_order_id)
+            if queue_position is None:
+                queue_position = queue_positions.get(ticker)
+
+            last_event = latest_events.get(order_id, {})
+            last_status = str(last_event.get("status") or "")
+            last_queue = _as_int(last_event.get("queue_position"))
+            if queue_position is not None and (last_status != "resting" or last_queue != queue_position):
+                self.store.insert_order_event(
+                    order_id=order_id,
+                    market_ticker=ticker,
+                    external_order_id=external_order_id,
+                    status="resting",
+                    queue_position=queue_position,
+                    event_ts=now_utc,
+                    details={},
+                )
+                stats["paper_order_events_inserted"] += 1
+
+            if queue_position is None:
+                continue
+            if queue_position <= self.settings.paper_trade_queue_max_depth:
+                continue
+            stats["paper_orders_queue_alerted"] += 1
+            if not allow_reprice:
+                continue
+            if not isinstance(order_created_at, datetime) or order_created_at > stale_cutoff:
+                continue
+            if self.store.has_recent_paper_order(ticker, direction, reprice_since):
+                continue
+            current_signal = signal_by_ticker.get(ticker)
+            expected_direction = "buy_yes" if side == "yes" else "buy_no"
+            if current_signal is None or current_signal.direction != expected_direction:
+                continue
+            snapshot = snapshots_by_ticker.get(ticker)
+            if snapshot is None:
+                continue
+            try:
+                cancel_payload = self.client.cancel_order(
+                    external_order_id,
+                    base_url=self.settings.paper_trading_base_url,
+                )
+                self.store.update_paper_trade_order_status(
+                    order_id=order_id,
+                    status="canceled",
+                    reason="queue_reprice_cancel",
+                    response_payload=cancel_payload if isinstance(cancel_payload, dict) else {},
+                )
+                self.store.insert_order_event(
+                    order_id=order_id,
+                    market_ticker=ticker,
+                    external_order_id=external_order_id,
+                    status="canceled",
+                    queue_position=queue_position,
+                    event_ts=now_utc,
+                    details={"reason": "queue_reprice_cancel"},
+                )
+                stats["paper_order_events_inserted"] += 1
+                stats["paper_orders_canceled"] += 1
+            except Exception as exc:
+                logger.warning(
+                    "paper_trade_reprice_cancel_failed order_id=%s external_order_id=%s",
+                    order_id,
+                    external_order_id,
+                    exc_info=True,
+                )
+                self.store.insert_order_event(
+                    order_id=order_id,
+                    market_ticker=ticker,
+                    external_order_id=external_order_id,
+                    status="queue_refresh_failed",
+                    queue_position=queue_position,
+                    event_ts=now_utc,
+                    details={"reason": str(exc)},
+                )
+                stats["paper_order_events_inserted"] += 1
+                stats["paper_orders_reprice_failed"] += 1
+                continue
+
+            book = _best_book_prices(snapshot)
+            new_price = _maker_price_for_side(
+                side=side,
+                book=book,
+                maker_only=self.settings.paper_trade_maker_only,
+                min_price_cents=self.settings.paper_trade_min_price_cents,
+                max_price_cents=self.settings.paper_trade_max_price_cents,
+            )
+            if new_price is None:
+                continue
+            old_price = _as_int(order.get("limit_price_cents"))
+            if old_price is not None and new_price == old_price:
+                continue
+            refreshed = self._submit_order(
+                market_ticker=ticker,
+                signal_type=str(order.get("signal_type") or current_signal.signal_type),
+                direction=expected_direction,
+                side=side,
+                count=int(order.get("count") or 1),
+                price_cents=new_price,
+                now_utc=now_utc,
+            )
+            repriced_orders.append(refreshed)
+            if refreshed.status == "submitted":
+                stats["paper_orders_repriced"] += 1
+            elif refreshed.status == "failed":
+                stats["paper_orders_reprice_failed"] += 1
+
+        if repriced_orders:
+            stats["paper_orders_reprice_recorded"] = self.store.insert_paper_trade_orders(
+                repriced_orders
+            )
+        return repriced_orders, stats

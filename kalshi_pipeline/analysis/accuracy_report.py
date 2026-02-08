@@ -12,6 +12,9 @@ class AccuracyReport:
     days: int
     n_signals: int
     brier_score: float | None
+    market_brier_score: float | None
+    log_loss: float | None
+    edge_reliability: float | None
     hit_rate: float | None
     avg_pnl_per_contract: float | None
     total_pnl: float | None
@@ -58,6 +61,9 @@ def generate_accuracy_report(
         days=days,
         n_signals=n_signals,
         brier_score=metrics.get("brier_score"),  # type: ignore[arg-type]
+        market_brier_score=metrics.get("market_brier_score"),  # type: ignore[arg-type]
+        log_loss=metrics.get("log_loss"),  # type: ignore[arg-type]
+        edge_reliability=metrics.get("edge_reliability"),  # type: ignore[arg-type]
         hit_rate=metrics.get("hit_rate"),  # type: ignore[arg-type]
         avg_pnl_per_contract=avg_pnl,  # type: ignore[arg-type]
         total_pnl=metrics.get("total_pnl"),  # type: ignore[arg-type]

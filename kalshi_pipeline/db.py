@@ -643,6 +643,77 @@ class PostgresStore:
             rows = cur.fetchall()
         return {str(status): int(count) for status, count in rows}
 
+    def get_paper_fill_metrics(self, *, days: int = 30) -> dict[str, float | int | None]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH scoped_orders AS (
+                    SELECT id, status
+                    FROM paper_trade_orders
+                    WHERE provider = 'kalshi_demo'
+                      AND created_at >= NOW() - (%s || ' days')::interval
+                      AND status <> 'simulated'
+                ),
+                first_open AS (
+                    SELECT order_id, MIN(event_ts) AS first_open_ts
+                    FROM paper_trade_order_events
+                    WHERE status IN ('submitted', 'resting', 'partially_filled')
+                    GROUP BY order_id
+                ),
+                first_fill AS (
+                    SELECT order_id, MIN(event_ts) AS first_fill_ts
+                    FROM paper_trade_order_events
+                    WHERE status = 'filled'
+                    GROUP BY order_id
+                )
+                SELECT
+                    COUNT(*)::INT AS total_orders,
+                    COUNT(*) FILTER (WHERE so.status = 'filled')::INT AS filled_orders,
+                    COUNT(*) FILTER (WHERE so.status IN ('submitted', 'partially_filled'))::INT AS open_orders,
+                    COUNT(*) FILTER (WHERE so.status = 'canceled')::INT AS canceled_orders,
+                    COUNT(*) FILTER (WHERE so.status = 'failed')::INT AS failed_orders,
+                    AVG(EXTRACT(EPOCH FROM (ff.first_fill_ts - fo.first_open_ts))) AS avg_fill_seconds
+                FROM scoped_orders so
+                LEFT JOIN first_open fo ON fo.order_id = so.id
+                LEFT JOIN first_fill ff ON ff.order_id = so.id
+                """,
+                (days,),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return {
+                "days": days,
+                "total_orders": 0,
+                "filled_orders": 0,
+                "open_orders": 0,
+                "canceled_orders": 0,
+                "failed_orders": 0,
+                "fill_rate": None,
+                "avg_fill_minutes": None,
+            }
+
+        total_orders = int(row[0] or 0)
+        filled_orders = int(row[1] or 0)
+        open_orders = int(row[2] or 0)
+        canceled_orders = int(row[3] or 0)
+        failed_orders = int(row[4] or 0)
+        settled_orders = filled_orders + canceled_orders + failed_orders
+        fill_rate = (filled_orders / settled_orders) if settled_orders > 0 else None
+        avg_fill_seconds = float(row[5]) if row[5] is not None else None
+        avg_fill_minutes = (avg_fill_seconds / 60.0) if avg_fill_seconds is not None else None
+
+        return {
+            "days": days,
+            "total_orders": total_orders,
+            "filled_orders": filled_orders,
+            "open_orders": open_orders,
+            "canceled_orders": canceled_orders,
+            "failed_orders": failed_orders,
+            "fill_rate": fill_rate,
+            "avg_fill_minutes": avg_fill_minutes,
+        }
+
     def get_recent_alert_events(self, *, limit: int = 10) -> list[dict[str, object]]:
         with self.conn.cursor() as cur:
             cur.execute(
@@ -672,7 +743,7 @@ class PostgresStore:
                 SELECT market_ticker, side, SUM(count) AS contracts,
                        AVG(limit_price_cents)::DOUBLE PRECISION AS avg_price_cents
                 FROM paper_trade_orders
-                WHERE status = 'submitted'
+                WHERE status IN ('submitted', 'partially_filled')
                 GROUP BY market_ticker, side
                 ORDER BY market_ticker
                 """
@@ -687,6 +758,107 @@ class PostgresStore:
             }
             for row in rows
         ]
+
+    def get_submitted_paper_orders(
+        self,
+        *,
+        limit: int = 200,
+        since_ts: datetime | None = None,
+    ) -> list[dict[str, object]]:
+        query = """
+            SELECT id, created_at, market_ticker, signal_type, direction, side,
+                   count, limit_price_cents, status, reason, external_order_id
+            FROM paper_trade_orders
+            WHERE status IN ('submitted', 'partially_filled')
+              AND external_order_id IS NOT NULL
+        """
+        params: list[object] = []
+        if since_ts is not None:
+            query += " AND created_at >= %s"
+            params.append(since_ts)
+        query += " ORDER BY created_at DESC LIMIT %s"
+        params.append(limit)
+        with self.conn.cursor() as cur:
+            cur.execute(query, tuple(params))
+            rows = cur.fetchall()
+        return [
+            {
+                "id": row[0],
+                "created_at": row[1],
+                "market_ticker": row[2],
+                "signal_type": row[3],
+                "direction": row[4],
+                "side": row[5],
+                "count": row[6],
+                "limit_price_cents": row[7],
+                "status": row[8],
+                "reason": row[9],
+                "external_order_id": row[10],
+            }
+            for row in rows
+        ]
+
+    def get_latest_order_events(
+        self, order_ids: list[int]
+    ) -> dict[int, dict[str, object]]:
+        cleaned_ids = [int(order_id) for order_id in order_ids if order_id is not None]
+        if not cleaned_ids:
+            return {}
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (order_id)
+                       order_id, status, queue_position, event_ts, details
+                FROM paper_trade_order_events
+                WHERE order_id = ANY(%s)
+                ORDER BY order_id, event_ts DESC, id DESC
+                """,
+                (cleaned_ids,),
+            )
+            rows = cur.fetchall()
+        output: dict[int, dict[str, object]] = {}
+        for row in rows:
+            output[int(row[0])] = {
+                "status": row[1],
+                "queue_position": row[2],
+                "event_ts": row[3],
+                "details": row[4] if isinstance(row[4], dict) else {},
+            }
+        return output
+
+    def update_paper_trade_order_status(
+        self,
+        *,
+        order_id: int,
+        status: str,
+        reason: str | None = None,
+        response_payload: dict[str, object] | None = None,
+    ) -> bool:
+        payload = response_payload or {}
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE paper_trade_orders
+                SET status = %s,
+                    reason = COALESCE(%s, reason),
+                    response_payload = CASE
+                        WHEN %s = '{}'::jsonb THEN response_payload
+                        ELSE %s
+                    END
+                WHERE id = %s
+                RETURNING id
+                """,
+                (
+                    status,
+                    reason,
+                    psycopg.types.json.Jsonb(payload),
+                    psycopg.types.json.Jsonb(payload),
+                    order_id,
+                ),
+            )
+            updated = cur.fetchone() is not None
+        self.conn.commit()
+        return updated
 
     def materialize_prediction_accuracy(self) -> int:
         with self.conn.cursor() as cur:
@@ -764,6 +936,26 @@ class PostgresStore:
                     ) AS brier_score,
                     AVG(
                         CASE
+                            WHEN pa.market_prob IS NULL OR pa.actual_outcome IS NULL THEN NULL
+                            ELSE POWER(pa.market_prob - CASE WHEN pa.actual_outcome THEN 1.0 ELSE 0.0 END, 2)
+                        END
+                    ) AS market_brier_score,
+                    AVG(
+                        CASE
+                            WHEN pa.model_prob IS NULL OR pa.actual_outcome IS NULL THEN NULL
+                            WHEN pa.actual_outcome THEN -LN(LEAST(0.999999, GREATEST(0.000001, pa.model_prob)))
+                            ELSE -LN(LEAST(0.999999, GREATEST(0.000001, 1.0 - pa.model_prob)))
+                        END
+                    ) AS log_loss,
+                    AVG(
+                        CASE
+                            WHEN pa.edge_bps IS NULL OR pa.pnl_per_contract IS NULL OR pa.edge_bps <= 0 THEN NULL
+                            WHEN pa.pnl_per_contract > 0 THEN 1.0
+                            ELSE 0.0
+                        END
+                    ) AS edge_reliability,
+                    AVG(
+                        CASE
                             WHEN pa.actual_outcome IS NULL THEN NULL
                             WHEN s.direction = 'buy_yes' AND pa.actual_outcome THEN 1.0
                             WHEN s.direction = 'buy_no' AND NOT pa.actual_outcome THEN 1.0
@@ -784,6 +976,9 @@ class PostgresStore:
                 "days": days,
                 "n_signals": 0,
                 "brier_score": None,
+                "market_brier_score": None,
+                "log_loss": None,
+                "edge_reliability": None,
                 "hit_rate": None,
                 "avg_pnl_per_contract": None,
                 "total_pnl": None,
@@ -792,9 +987,12 @@ class PostgresStore:
             "days": days,
             "n_signals": int(row[0] or 0),
             "brier_score": float(row[1]) if row[1] is not None else None,
-            "hit_rate": float(row[2]) if row[2] is not None else None,
-            "avg_pnl_per_contract": float(row[3]) if row[3] is not None else None,
-            "total_pnl": float(row[4]) if row[4] is not None else None,
+            "market_brier_score": float(row[2]) if row[2] is not None else None,
+            "log_loss": float(row[3]) if row[3] is not None else None,
+            "edge_reliability": float(row[4]) if row[4] is not None else None,
+            "hit_rate": float(row[5]) if row[5] is not None else None,
+            "avg_pnl_per_contract": float(row[6]) if row[6] is not None else None,
+            "total_pnl": float(row[7]) if row[7] is not None else None,
         }
 
     def get_calibration_curve(
