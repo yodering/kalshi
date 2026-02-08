@@ -4,6 +4,9 @@ Minimal Week 1 data pipeline for Kalshi market ingestion with:
 
 - Kalshi client wiring with signed live requests
 - Market and snapshot schema in PostgreSQL
+- Open-Meteo ensemble ingestion for NYC weather
+- BTC spot ingestion from Binance, Coinbase, and Kraken
+- Weather/BTC signal scaffolding (no trade execution yet)
 - Historical backfill on startup
 - Polling loop with persistent storage
 - Railway-ready worker deployment
@@ -73,6 +76,17 @@ python3 -m kalshi_pipeline.main discover-targets
 - `TARGET_EVENT_TICKERS`: optional comma-separated exact event tickers
 - `TARGET_SERIES_TICKERS`: optional comma-separated exact series tickers
 - `STORE_RAW_JSON`: whether to persist full raw API payloads (default `false`)
+- `WEATHER_ENABLED`: enable Open-Meteo ensemble collector
+- `WEATHER_LATITUDE`: forecast latitude (default Central Park)
+- `WEATHER_LONGITUDE`: forecast longitude (default Central Park)
+- `WEATHER_TIMEZONE`: timezone used for "today" weather target date
+- `WEATHER_ENSEMBLE_MODELS`: comma-separated Open-Meteo ensemble models
+- `WEATHER_FORECAST_DAYS`: how far ahead to request weather data
+- `BTC_ENABLED`: enable BTC spot collectors
+- `BTC_SYMBOL`: symbol label stored in DB (`BTCUSD` by default)
+- `BTC_MOMENTUM_LOOKBACK_MINUTES`: lookback used in BTC momentum signal
+- `SIGNAL_MIN_EDGE_BPS`: minimum edge for actionable direction
+- `SIGNAL_STORE_ALL`: store flat signals too (`true` by default)
 
 ## 4. Railway Deployment
 
@@ -112,3 +126,12 @@ After any variable change, redeploy the worker service.
 - If no markets match your filters, logs will show:
   - `No markets matched current target filters. Check TARGET_* env settings.`
 - When `TARGET_MARKET_TICKERS` is set, the pipeline fetches those exact contracts directly.
+- This build stores signals only; no order placement endpoints are called yet.
+
+## 6. Stored Tables
+
+- `markets`
+- `market_snapshots`
+- `weather_ensemble_samples`
+- `crypto_spot_ticks`
+- `signals`

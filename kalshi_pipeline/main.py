@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = Settings.from_env()
     logger.info(
-        "startup kalshi_stub_mode=%s kalshi_auth_for_public=%s database_source=%s database_target=%s target_groups=%s target_tickers=%s store_raw_json=%s",
+        "startup kalshi_stub_mode=%s kalshi_auth_for_public=%s database_source=%s database_target=%s target_groups=%s target_tickers=%s store_raw_json=%s weather_enabled=%s btc_enabled=%s signal_min_edge_bps=%s",
         settings.kalshi_stub_mode,
         settings.kalshi_use_auth_for_public_data,
         settings.database_url_source,
@@ -42,6 +42,9 @@ def main(argv: list[str] | None = None) -> int:
         ";".join(settings.target_market_query_groups),
         ",".join(settings.target_market_tickers),
         settings.store_raw_json,
+        settings.weather_enabled,
+        settings.btc_enabled,
+        settings.signal_min_edge_bps,
     )
 
     if args.command == "health-check":

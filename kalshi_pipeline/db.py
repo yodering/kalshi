@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import psycopg
 
-from .models import Market, MarketSnapshot
+from .models import (
+    CryptoSpotTick,
+    Market,
+    MarketSnapshot,
+    SignalRecord,
+    WeatherEnsembleSample,
+)
 
 
 class PostgresStore:
@@ -88,6 +95,136 @@ class PostgresStore:
                         snapshot.no_price,
                         snapshot.volume,
                         psycopg.types.json.Jsonb(snapshot.raw_json if self.store_raw_json else {}),
+                    ),
+                )
+                if cur.fetchone() is not None:
+                    inserted_count += 1
+        self.conn.commit()
+        return inserted_count
+
+    def insert_weather_ensemble_samples(self, samples: list[WeatherEnsembleSample]) -> int:
+        inserted_count = 0
+        with self.conn.cursor() as cur:
+            for sample in samples:
+                cur.execute(
+                    """
+                    INSERT INTO weather_ensemble_samples (
+                        collected_at,
+                        target_date,
+                        model,
+                        member,
+                        max_temp_f,
+                        source,
+                        raw_json
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (collected_at, target_date, model, member)
+                    DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        sample.collected_at,
+                        sample.target_date,
+                        sample.model,
+                        sample.member,
+                        sample.max_temp_f,
+                        sample.source,
+                        psycopg.types.json.Jsonb(sample.raw_json if self.store_raw_json else {}),
+                    ),
+                )
+                if cur.fetchone() is not None:
+                    inserted_count += 1
+        self.conn.commit()
+        return inserted_count
+
+    def insert_crypto_spot_ticks(self, ticks: list[CryptoSpotTick]) -> int:
+        inserted_count = 0
+        with self.conn.cursor() as cur:
+            for tick in ticks:
+                cur.execute(
+                    """
+                    INSERT INTO crypto_spot_ticks (
+                        ts,
+                        source,
+                        symbol,
+                        price_usd,
+                        raw_json
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (ts, source, symbol)
+                    DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        tick.ts,
+                        tick.source,
+                        tick.symbol,
+                        tick.price_usd,
+                        psycopg.types.json.Jsonb(tick.raw_json if self.store_raw_json else {}),
+                    ),
+                )
+                if cur.fetchone() is not None:
+                    inserted_count += 1
+        self.conn.commit()
+        return inserted_count
+
+    def get_recent_crypto_spot_ticks(
+        self, symbol: str, since_ts: datetime
+    ) -> list[CryptoSpotTick]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ts, source, symbol, price_usd, raw_json
+                FROM crypto_spot_ticks
+                WHERE symbol = %s AND ts >= %s
+                ORDER BY ts ASC
+                """,
+                (symbol, since_ts),
+            )
+            rows = cur.fetchall()
+        ticks: list[CryptoSpotTick] = []
+        for row in rows:
+            ticks.append(
+                CryptoSpotTick(
+                    ts=row[0],
+                    source=row[1],
+                    symbol=row[2],
+                    price_usd=float(row[3]),
+                    raw_json=row[4] if isinstance(row[4], dict) else {},
+                )
+            )
+        return ticks
+
+    def insert_signals(self, signals: list[SignalRecord]) -> int:
+        inserted_count = 0
+        with self.conn.cursor() as cur:
+            for signal in signals:
+                cur.execute(
+                    """
+                    INSERT INTO signals (
+                        signal_type,
+                        market_ticker,
+                        direction,
+                        model_probability,
+                        market_probability,
+                        edge_bps,
+                        confidence,
+                        details,
+                        created_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        signal.signal_type,
+                        signal.market_ticker,
+                        signal.direction,
+                        signal.model_probability,
+                        signal.market_probability,
+                        signal.edge_bps,
+                        signal.confidence,
+                        psycopg.types.json.Jsonb(signal.details if self.store_raw_json else signal.details),
+                        signal.created_at,
                     ),
                 )
                 if cur.fetchone() is not None:

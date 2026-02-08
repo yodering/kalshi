@@ -4,10 +4,14 @@ from datetime import datetime, timedelta, timezone
 import logging
 import time
 
+from .collectors.crypto import fetch_btc_spot_ticks
+from .collectors.weather import fetch_weather_ensemble_samples
 from .config import Settings
 from .db import PostgresStore
 from .kalshi_client import KalshiClient
 from .models import MarketSnapshot
+from .signals.btc import build_btc_signals
+from .signals.weather import build_weather_signals
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +61,70 @@ class DataPipeline:
                 inserted_historical += self.store.insert_snapshots(history, ticker_to_id)
             self.did_backfill = True
 
+        inserted_weather_samples = 0
+        weather_samples = []
+        if self.settings.weather_enabled:
+            try:
+                weather_samples = fetch_weather_ensemble_samples(self.settings, now_utc=now)
+                inserted_weather_samples = self.store.insert_weather_ensemble_samples(weather_samples)
+            except Exception:
+                logger.exception("weather_collection_failed")
+
+        inserted_crypto_ticks = 0
+        crypto_ticks = []
+        if self.settings.btc_enabled:
+            try:
+                crypto_ticks = fetch_btc_spot_ticks(self.settings, now_utc=now)
+                inserted_crypto_ticks = self.store.insert_crypto_spot_ticks(crypto_ticks)
+            except Exception:
+                logger.exception("btc_collection_failed")
+
+        generated_signals = 0
+        inserted_signals = 0
+        try:
+            snapshots_by_ticker = {snapshot.ticker: snapshot for snapshot in current_snapshots}
+            all_signals = []
+            if weather_samples:
+                all_signals.extend(
+                    build_weather_signals(
+                        self.settings,
+                        markets,
+                        snapshots_by_ticker,
+                        weather_samples,
+                        now_utc=now,
+                    )
+                )
+            if self.settings.btc_enabled:
+                lookback_window = max(self.settings.btc_momentum_lookback_minutes + 2, 20)
+                recent_ticks = self.store.get_recent_crypto_spot_ticks(
+                    symbol=self.settings.btc_symbol,
+                    since_ts=now - timedelta(minutes=lookback_window),
+                )
+                all_signals.extend(
+                    build_btc_signals(
+                        self.settings,
+                        markets,
+                        snapshots_by_ticker,
+                        recent_ticks,
+                        crypto_ticks,
+                        now_utc=now,
+                    )
+                )
+            generated_signals = len(all_signals)
+            if all_signals:
+                inserted_signals = self.store.insert_signals(all_signals)
+        except Exception:
+            logger.exception("signal_generation_failed")
+
         return {
             "markets_seen": len(markets),
             "current_snapshots_inserted": inserted_current,
             "historical_snapshots_inserted": inserted_historical,
             "current_snapshot_failures": failed_markets,
+            "weather_samples_inserted": inserted_weather_samples,
+            "crypto_ticks_inserted": inserted_crypto_ticks,
+            "signals_generated": generated_signals,
+            "signals_inserted": inserted_signals,
         }
 
     def run_forever(self) -> None:
@@ -69,13 +132,8 @@ class DataPipeline:
             started = time.monotonic()
             try:
                 stats = self.run_once()
-                logger.info(
-                    "poll_complete markets=%s current_inserted=%s historical_inserted=%s failures=%s",
-                    stats["markets_seen"],
-                    stats["current_snapshots_inserted"],
-                    stats["historical_snapshots_inserted"],
-                    stats["current_snapshot_failures"],
-                )
+                metrics = " ".join(f"{key}={value}" for key, value in stats.items())
+                logger.info("poll_complete %s", metrics)
             except Exception:
                 logger.exception("poll_failed")
             elapsed = time.monotonic() - started

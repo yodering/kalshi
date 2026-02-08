@@ -18,6 +18,12 @@ def _as_int(value: str | None, default: int) -> int:
     return int(value)
 
 
+def _as_float(value: str | None, default: float) -> float:
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
 def _as_list(value: str | None) -> list[str]:
     if value is None:
         return []
@@ -166,6 +172,17 @@ class Settings:
     target_market_status: str
     target_market_discovery_pages: int
     store_raw_json: bool
+    weather_enabled: bool
+    weather_latitude: float
+    weather_longitude: float
+    weather_timezone: str
+    weather_ensemble_models: list[str]
+    weather_forecast_days: int
+    btc_enabled: bool
+    btc_symbol: str
+    btc_momentum_lookback_minutes: int
+    signal_min_edge_bps: int
+    signal_store_all: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -200,4 +217,20 @@ class Settings:
             target_market_status=os.getenv("TARGET_MARKET_STATUS", "open").strip() or "open",
             target_market_discovery_pages=_as_int(os.getenv("TARGET_MARKET_DISCOVERY_PAGES"), 10),
             store_raw_json=_as_bool(os.getenv("STORE_RAW_JSON"), False),
+            weather_enabled=_as_bool(os.getenv("WEATHER_ENABLED"), True),
+            weather_latitude=_as_float(os.getenv("WEATHER_LATITUDE"), 40.7829),
+            weather_longitude=_as_float(os.getenv("WEATHER_LONGITUDE"), -73.9654),
+            weather_timezone=os.getenv("WEATHER_TIMEZONE", "America/New_York").strip()
+            or "America/New_York",
+            weather_ensemble_models=_as_list(
+                os.getenv("WEATHER_ENSEMBLE_MODELS", "gfs_ensemble,ecmwf_ifs025_ensemble")
+            ),
+            weather_forecast_days=_as_int(os.getenv("WEATHER_FORECAST_DAYS"), 2),
+            btc_enabled=_as_bool(os.getenv("BTC_ENABLED"), True),
+            btc_symbol=os.getenv("BTC_SYMBOL", "BTCUSD").strip() or "BTCUSD",
+            btc_momentum_lookback_minutes=_as_int(
+                os.getenv("BTC_MOMENTUM_LOOKBACK_MINUTES"), 5
+            ),
+            signal_min_edge_bps=_as_int(os.getenv("SIGNAL_MIN_EDGE_BPS"), 150),
+            signal_store_all=_as_bool(os.getenv("SIGNAL_STORE_ALL"), True),
         )
