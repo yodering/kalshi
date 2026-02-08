@@ -35,6 +35,39 @@ class DataPipeline:
         self.pending_live_mode: str | None = None
         self.last_poll_at: datetime | None = None
         self.last_stats: dict[str, int] = {}
+        self._operational_alert_last_sent_at: dict[str, datetime] = {}
+        self._operational_alert_cooldown = timedelta(hours=6)
+        self._operational_alert_max_per_cycle = 3
+
+    def _filter_operational_alerts(self, now_utc: datetime, messages: list[str]) -> list[str]:
+        if not messages:
+            return []
+        filtered: list[str] = []
+        seen_this_cycle: set[str] = set()
+
+        # Garbage-collect old keys so this map does not grow forever.
+        gc_before = now_utc - timedelta(days=2)
+        stale_keys = [
+            key
+            for key, ts in self._operational_alert_last_sent_at.items()
+            if ts < gc_before
+        ]
+        for key in stale_keys:
+            self._operational_alert_last_sent_at.pop(key, None)
+
+        for message in messages:
+            key = message.strip()
+            if not key or key in seen_this_cycle:
+                continue
+            seen_this_cycle.add(key)
+            last_sent_at = self._operational_alert_last_sent_at.get(key)
+            if last_sent_at is not None and (now_utc - last_sent_at) < self._operational_alert_cooldown:
+                continue
+            filtered.append(message)
+            self._operational_alert_last_sent_at[key] = now_utc
+            if len(filtered) >= self._operational_alert_max_per_cycle:
+                break
+        return filtered
 
     def set_paused(self, paused: bool) -> None:
         self.paused = paused
@@ -278,7 +311,10 @@ class DataPipeline:
                 open_positions=open_positions,
                 current_signals=signal_rows,
                 edge_decay_alert_threshold_bps=self.settings.edge_decay_alert_threshold_bps,
+                active_market_tickers={market.ticker for market in markets},
             )
+            if decay_messages:
+                decay_messages = self._filter_operational_alerts(now, decay_messages)
             if decay_messages:
                 alert_events.extend(
                     self.telegram_notifier.notify_operational_alerts(now, decay_messages)
