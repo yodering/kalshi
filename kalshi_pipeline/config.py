@@ -18,6 +18,28 @@ def _as_int(value: str | None, default: int) -> int:
     return int(value)
 
 
+def _as_list(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    items = []
+    for part in value.split(","):
+        cleaned = part.strip()
+        if cleaned:
+            items.append(cleaned)
+    return items
+
+
+def _as_groups(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    groups = []
+    for part in value.split(";"):
+        cleaned = part.strip()
+        if cleaned:
+            groups.append(cleaned)
+    return groups
+
+
 def _clean_env(value: str | None) -> str:
     if value is None:
         return ""
@@ -117,6 +139,14 @@ class Settings:
     kalshi_base_url: str
     kalshi_api_key_id: str
     kalshi_api_key_secret: str
+    kalshi_private_key_path: str
+    target_market_tickers: list[str]
+    target_event_tickers: list[str]
+    target_series_tickers: list[str]
+    target_market_query_groups: list[str]
+    target_market_status: str
+    target_market_discovery_pages: int
+    store_raw_json: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -135,4 +165,17 @@ class Settings:
             kalshi_base_url=os.getenv("KALSHI_BASE_URL", "https://api.kalshi.com"),
             kalshi_api_key_id=os.getenv("KALSHI_API_KEY_ID", ""),
             kalshi_api_key_secret=os.getenv("KALSHI_API_KEY_SECRET", ""),
+            kalshi_private_key_path=os.getenv("KALSHI_PRIVATE_KEY_PATH", ""),
+            target_market_tickers=_as_list(os.getenv("TARGET_MARKET_TICKERS")),
+            target_event_tickers=_as_list(os.getenv("TARGET_EVENT_TICKERS")),
+            target_series_tickers=_as_list(os.getenv("TARGET_SERIES_TICKERS")),
+            target_market_query_groups=_as_groups(
+                os.getenv(
+                    "TARGET_MARKET_QUERY_GROUPS",
+                    "new york city temperature;bitcoin up or down 15 minutes",
+                )
+            ),
+            target_market_status=os.getenv("TARGET_MARKET_STATUS", "open").strip() or "open",
+            target_market_discovery_pages=_as_int(os.getenv("TARGET_MARKET_DISCOVERY_PAGES"), 10),
+            store_raw_json=_as_bool(os.getenv("STORE_RAW_JSON"), False),
         )

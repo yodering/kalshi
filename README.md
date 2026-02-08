@@ -2,7 +2,7 @@
 
 Minimal Week 1 data pipeline for Kalshi market ingestion with:
 
-- Kalshi client wiring (stub-first, live mode placeholders)
+- Kalshi client wiring with signed live requests
 - Market and snapshot schema in PostgreSQL
 - Historical backfill on startup
 - Polling loop with persistent storage
@@ -45,6 +45,12 @@ Check API connectivity mode:
 python3 -m kalshi_pipeline.main health-check
 ```
 
+Preview matched target markets:
+
+```bash
+python3 -m kalshi_pipeline.main discover-targets
+```
+
 ## 3. Environment Variables
 
 - `DATABASE_URL`: PostgreSQL connection string
@@ -53,10 +59,19 @@ python3 -m kalshi_pipeline.main health-check
 - `HISTORICAL_DAYS`: backfill window on startup (default `7`)
 - `HISTORICAL_MARKETS`: number of markets to backfill (default `10`)
 - `RUN_HISTORICAL_BACKFILL_ON_START`: `true` or `false`
-- `KALSHI_STUB_MODE`: `true` or `false` (default `true`)
+- `KALSHI_STUB_MODE`: `true` or `false` (default `false` in `.env.example`)
 - `KALSHI_BASE_URL`: Kalshi base URL
-- `KALSHI_API_KEY_ID`: used for live mode placeholder auth headers
-- `KALSHI_API_KEY_SECRET`: used for live mode placeholder auth headers
+- `KALSHI_API_KEY_ID`: Kalshi key id
+- `KALSHI_API_KEY_SECRET`: private key PEM contents (or a file path if no PEM header is present)
+- `KALSHI_PRIVATE_KEY_PATH`: optional explicit path to key PEM file
+- `KALSHI_PRIVATE_KEY_PASSWORD`: optional private key password
+- `TARGET_MARKET_QUERY_GROUPS`: semicolon-separated keyword groups (default: NYC temperature + BTC 15m up/down)
+- `TARGET_MARKET_STATUS`: market status filter (default `open`)
+- `TARGET_MARKET_DISCOVERY_PAGES`: max pages scanned during target discovery (default `10`)
+- `TARGET_MARKET_TICKERS`: optional comma-separated exact market tickers
+- `TARGET_EVENT_TICKERS`: optional comma-separated exact event tickers
+- `TARGET_SERIES_TICKERS`: optional comma-separated exact series tickers
+- `STORE_RAW_JSON`: whether to persist full raw API payloads (default `false`)
 
 ## 4. Railway Deployment
 
@@ -65,7 +80,7 @@ python3 -m kalshi_pipeline.main health-check
 3. Add env vars:
 - `DATABASE_URL` exactly as a reference to Postgres service value, no quotes:
   - `${{Postgres.DATABASE_URL}}`
-- `KALSHI_STUB_MODE=true` for now
+- `KALSHI_STUB_MODE=false`
 - Optional tuning vars (`POLL_INTERVAL_SECONDS`, `MARKET_LIMIT`, etc.)
 4. Deploy the service (uses `railway.json` + `Dockerfile`).
 5. Confirm logs show `poll_complete` every interval.
@@ -91,5 +106,6 @@ After any variable change, redeploy the worker service.
 
 ## 5. Notes
 
-- Current auth in live mode is intentionally a placeholder for Week 1.
-- Replace `KalshiClient._build_auth_headers` with the official Kalshi signing flow once credentials are available.
+- Live mode now signs each request (`timestamp + method + path`) using RSA-PSS/SHA256.
+- If no markets match your filters, logs will show:
+  - `No markets matched current target filters. Check TARGET_* env settings.`

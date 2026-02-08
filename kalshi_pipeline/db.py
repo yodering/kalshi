@@ -9,8 +9,9 @@ from .models import Market, MarketSnapshot
 
 
 class PostgresStore:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, store_raw_json: bool = False) -> None:
         self.database_url = database_url
+        self.store_raw_json = store_raw_json
         try:
             self.conn = psycopg.connect(database_url, connect_timeout=15)
         except psycopg.OperationalError as exc:
@@ -51,7 +52,7 @@ class PostgresStore:
                         market.title,
                         market.status,
                         market.close_time,
-                        psycopg.types.json.Jsonb(market.raw_json),
+                        psycopg.types.json.Jsonb(market.raw_json if self.store_raw_json else {}),
                     ),
                 )
                 ticker_to_id[market.ticker] = cur.fetchone()[0]
@@ -86,7 +87,7 @@ class PostgresStore:
                         snapshot.yes_price,
                         snapshot.no_price,
                         snapshot.volume,
-                        psycopg.types.json.Jsonb(snapshot.raw_json),
+                        psycopg.types.json.Jsonb(snapshot.raw_json if self.store_raw_json else {}),
                     ),
                 )
                 if cur.fetchone() is not None:

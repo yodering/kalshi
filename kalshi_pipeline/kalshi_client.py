@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
+import os
+from pathlib import Path
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+except ModuleNotFoundError:  # pragma: no cover - runtime guard for missing deps
+    hashes = None
+    serialization = None
+    padding = None
 import requests
 
 from .config import Settings
@@ -36,22 +48,39 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _tokenize_group(group: str) -> list[str]:
+    raw_tokens = re.findall(r"[a-z0-9]+", group.lower())
+    stopwords = {"the", "a", "an", "in", "for", "at", "to", "of", "will", "be"}
+    return [token for token in raw_tokens if token not in stopwords]
+
+
+def _market_text(row: dict[str, Any]) -> str:
+    parts = [
+        str(row.get("ticker", "")),
+        str(row.get("title", "")),
+        str(row.get("subtitle", "")),
+        str(row.get("event_ticker", "")),
+        str(row.get("series_ticker", "")),
+    ]
+    return " ".join(parts).lower()
+
+
 class KalshiClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.session = requests.Session()
+        self._private_key = None
 
     def health_check(self) -> dict[str, Any]:
         if self.settings.kalshi_stub_mode:
             return {"ok": True, "mode": "stub"}
-        payload = self._request_json("GET", "/trade-api/v2/markets", params={"limit": 1})
+        payload = self._request_json("GET", "/trade-api/v2/portfolio/balance")
         return {"ok": True, "mode": "live", "result_keys": sorted(payload.keys())}
 
     def list_markets(self, limit: int) -> list[Market]:
         if self.settings.kalshi_stub_mode:
             return generate_markets(limit)
-        payload = self._request_json("GET", "/trade-api/v2/markets", params={"limit": limit})
-        rows = payload.get("markets") or payload.get("data") or []
+        rows = self._discover_target_markets(limit=limit)
         markets: list[Market] = []
         for row in rows:
             ticker = row.get("ticker") or row.get("id")
@@ -72,6 +101,7 @@ class KalshiClient:
         if self.settings.kalshi_stub_mode:
             return generate_current_snapshot(market, datetime.now(timezone.utc))
         payload = self._request_json("GET", f"/trade-api/v2/markets/{market.ticker}")
+        payload = payload.get("market", payload)
         yes_price = _as_float(
             payload.get("yes_ask")
             or payload.get("yes_bid")
@@ -121,13 +151,72 @@ class KalshiClient:
             )
         return snapshots
 
+    def _discover_target_markets(self, limit: int) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"limit": min(1000, max(1, limit))}
+        if self.settings.target_market_status:
+            params["status"] = self.settings.target_market_status
+
+        if self.settings.target_market_tickers:
+            params["tickers"] = ",".join(self.settings.target_market_tickers)
+            payload = self._request_json("GET", "/trade-api/v2/markets", params=params)
+            rows = payload.get("markets") or payload.get("data") or []
+            return rows[:limit]
+
+        matched: dict[str, dict[str, Any]] = {}
+        pages_seen = 0
+        cursor: str | None = None
+        while pages_seen < self.settings.target_market_discovery_pages:
+            page_params = dict(params)
+            if cursor:
+                page_params["cursor"] = cursor
+            payload = self._request_json("GET", "/trade-api/v2/markets", params=page_params)
+            rows = payload.get("markets") or payload.get("data") or []
+            if not rows:
+                break
+            for row in rows:
+                if not self._matches_targets(row):
+                    continue
+                ticker = str(row.get("ticker", "")).strip()
+                if ticker:
+                    matched[ticker] = row
+            pages_seen += 1
+            cursor = payload.get("cursor")
+            if not cursor:
+                break
+
+        if matched:
+            return list(matched.values())[:limit]
+        return []
+
+    def _matches_targets(self, row: dict[str, Any]) -> bool:
+        ticker = str(row.get("ticker", ""))
+        event_ticker = str(row.get("event_ticker", ""))
+        series_ticker = str(row.get("series_ticker", ""))
+        if self.settings.target_event_tickers and event_ticker in self.settings.target_event_tickers:
+            return True
+        if self.settings.target_series_tickers and series_ticker in self.settings.target_series_tickers:
+            return True
+        text = _market_text(row)
+        for group in self.settings.target_market_query_groups:
+            tokens = _tokenize_group(group)
+            if not tokens:
+                continue
+            if all(token in text for token in tokens):
+                return True
+        # keep explicit fallback support even in discovery mode
+        if self.settings.target_market_tickers and ticker in self.settings.target_market_tickers:
+            return True
+        return False
+
     def _request_json(self, method: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.settings.kalshi_base_url.rstrip('/')}{path}"
+        split = urlsplit(url)
+        path_for_signing = split.path or path
         response = self.session.request(
             method=method,
             url=url,
             params=params,
-            headers=self._build_auth_headers(),
+            headers=self._build_auth_headers(method=method, path=path_for_signing),
             timeout=20,
         )
         response.raise_for_status()
@@ -136,14 +225,61 @@ class KalshiClient:
             return payload
         return {"data": payload}
 
-    def _build_auth_headers(self) -> dict[str, str]:
-        if not self.settings.kalshi_api_key_id or not self.settings.kalshi_api_key_secret:
+    def _build_auth_headers(self, method: str, path: str) -> dict[str, str]:
+        base_headers = {"Accept": "application/json"}
+        if self.settings.kalshi_stub_mode:
+            return base_headers
+        if hashes is None or serialization is None or padding is None:
             raise RuntimeError(
-                "KALSHI_API_KEY_ID and KALSHI_API_KEY_SECRET are required for live mode."
+                "Missing dependency 'cryptography'. Install requirements before live mode."
             )
-        # Placeholder auth wiring for Week 1. Replace with official signed request auth when keys are ready.
+        has_key_material = bool(
+            self.settings.kalshi_api_key_secret or self.settings.kalshi_private_key_path
+        )
+        if not self.settings.kalshi_api_key_id or not has_key_material:
+            raise RuntimeError(
+                "KALSHI_API_KEY_ID and private key material are required for live mode."
+            )
+        private_key = self._load_private_key()
+        timestamp_ms = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+        message = f"{timestamp_ms}{method.upper()}{path}".encode("utf-8")
+        signature = private_key.sign(
+            message,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+            hashes.SHA256(),
+        )
+        signature_b64 = base64.b64encode(signature).decode("utf-8")
         return {
-            "X-KALSHI-KEY-ID": self.settings.kalshi_api_key_id,
-            "X-KALSHI-KEY-SECRET": self.settings.kalshi_api_key_secret,
-            "Accept": "application/json",
+            **base_headers,
+            "KALSHI-ACCESS-KEY": self.settings.kalshi_api_key_id,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+            "KALSHI-ACCESS-SIGNATURE": signature_b64,
         }
+
+    def _load_private_key(self):
+        if self._private_key is not None:
+            return self._private_key
+
+        raw_key = ""
+        if self.settings.kalshi_private_key_path:
+            key_path = Path(self.settings.kalshi_private_key_path)
+            raw_key = key_path.read_text(encoding="utf-8")
+        elif self.settings.kalshi_api_key_secret:
+            possible_path = Path(self.settings.kalshi_api_key_secret)
+            if possible_path.exists() and possible_path.is_file():
+                raw_key = possible_path.read_text(encoding="utf-8")
+            else:
+                raw_key = self.settings.kalshi_api_key_secret
+        raw_key = raw_key.strip()
+        if not raw_key:
+            raise RuntimeError(
+                "No private key found. Set KALSHI_PRIVATE_KEY_PATH or KALSHI_API_KEY_SECRET."
+            )
+        if "\\n" in raw_key and "-----BEGIN" in raw_key:
+            raw_key = raw_key.replace("\\n", "\n")
+        password_raw = os.getenv("KALSHI_PRIVATE_KEY_PASSWORD", "")
+        password: bytes | None = password_raw.encode("utf-8") if password_raw else None
+        self._private_key = serialization.load_pem_private_key(
+            raw_key.encode("utf-8"), password=password
+        )
+        return self._private_key

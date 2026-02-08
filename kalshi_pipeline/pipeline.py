@@ -22,6 +22,17 @@ class DataPipeline:
     def run_once(self) -> dict[str, int]:
         now = datetime.now(timezone.utc)
         markets = self.client.list_markets(self.settings.market_limit)
+        if not markets:
+            logger.warning(
+                "No markets matched current target filters. Check TARGET_* env settings."
+            )
+            return {
+                "markets_seen": 0,
+                "current_snapshots_inserted": 0,
+                "historical_snapshots_inserted": 0,
+                "current_snapshot_failures": 0,
+            }
+        logger.info("target_markets %s", ",".join(market.ticker for market in markets))
         ticker_to_id = self.store.upsert_markets(markets)
 
         current_snapshots: list[MarketSnapshot] = []
@@ -70,4 +81,3 @@ class DataPipeline:
             elapsed = time.monotonic() - started
             sleep_seconds = max(1, self.settings.poll_interval_seconds - int(elapsed))
             time.sleep(sleep_seconds)
-
