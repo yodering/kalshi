@@ -138,14 +138,45 @@ class KalshiClient:
     ) -> list[MarketSnapshot]:
         if self.settings.kalshi_stub_mode:
             return generate_historical_snapshots(market, start, end)
-        params = {"start": start.isoformat(), "end": end.isoformat(), "period_interval": 60}
-        payload = self._request_json(
-            "GET", f"/trade-api/v2/markets/{market.ticker}/candlesticks", params=params
-        )
+        series_ticker = self._series_from_ticker(market)
+        attempts: list[tuple[str, dict[str, Any]]] = [
+            (
+                f"/trade-api/v2/markets/{market.ticker}/candlesticks",
+                {"start": start.isoformat(), "end": end.isoformat(), "period_interval": 60},
+            ),
+        ]
+        if series_ticker:
+            attempts.append(
+                (
+                    f"/trade-api/v2/markets/{series_ticker}/{market.ticker}/candlesticks",
+                    {
+                        "start_ts": int(start.timestamp()),
+                        "end_ts": int(end.timestamp()),
+                        "period_interval": 1,
+                    },
+                )
+            )
+
+        payload: dict[str, Any] | None = None
+        for path, params in attempts:
+            try:
+                payload = self._request_json("GET", path, params=params)
+                break
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status in {404, 400}:
+                    continue
+                raise
+        if payload is None:
+            logger.info("No candlestick endpoint available for ticker=%s", market.ticker)
+            return []
+
         rows = payload.get("candlesticks") or payload.get("candles") or payload.get("data") or []
         snapshots: list[MarketSnapshot] = []
         for row in rows:
-            ts = _parse_iso_datetime(row.get("end_period_ts") or row.get("ts"))
+            ts = _parse_iso_datetime(
+                row.get("end_period_ts") or row.get("end_ts") or row.get("ts")
+            )
             if ts is None:
                 continue
             yes_price = _as_float(row.get("close_yes") or row.get("yes_price") or row.get("close"))
@@ -344,6 +375,15 @@ class KalshiClient:
 
     def _row_close_time(self, row: dict[str, Any]) -> datetime | None:
         return _parse_iso_datetime(row.get("close_time") or row.get("expiration_time"))
+
+    def _series_from_ticker(self, market: Market) -> str:
+        raw_series = str(market.raw_json.get("series_ticker", "")).strip().upper()
+        if raw_series:
+            return raw_series
+        ticker = market.ticker.strip().upper()
+        if "-" in ticker:
+            return ticker.split("-", 1)[0]
+        return ""
 
     def _matches_targets(self, row: dict[str, Any]) -> bool:
         ticker = str(row.get("ticker", "")).upper()
