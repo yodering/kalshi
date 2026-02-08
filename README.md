@@ -74,7 +74,8 @@ python3 -m kalshi_pipeline.main discover-targets
 - `TARGET_MARKET_DISCOVERY_PAGES`: max pages scanned during target discovery (default `10`)
 - `TARGET_MARKET_TICKERS`: optional comma-separated exact market tickers (or full Kalshi market URLs)
 - `TARGET_EVENT_TICKERS`: optional comma-separated exact event tickers
-- `TARGET_SERIES_TICKERS`: optional comma-separated exact series tickers
+- `TARGET_SERIES_TICKERS`: comma-separated series (default `KXHIGHNY,KXBTC15M`)
+- `AUTO_SELECT_LIVE_CONTRACTS`: auto-pick current contracts when tickers are not pinned
 - `STORE_RAW_JSON`: whether to persist full raw API payloads (default `false`)
 - `WEATHER_ENABLED`: enable Open-Meteo ensemble collector
 - `WEATHER_LATITUDE`: forecast latitude (default Central Park)
@@ -126,6 +127,9 @@ After any variable change, redeploy the worker service.
 - If no markets match your filters, logs will show:
   - `No markets matched current target filters. Check TARGET_* env settings.`
 - When `TARGET_MARKET_TICKERS` is set, the pipeline fetches those exact contracts directly.
+- With `AUTO_SELECT_LIVE_CONTRACTS=true` and no pinned tickers:
+  - KXHIGHNY: selects one live event and ingests all brackets
+  - KXBTC15M: selects nearest live 15-minute contract
 - This build stores signals only; no order placement endpoints are called yet.
 
 ## 6. Stored Tables

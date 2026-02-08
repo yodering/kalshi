@@ -168,6 +168,7 @@ class Settings:
     target_market_tickers: list[str]
     target_event_tickers: list[str]
     target_series_tickers: list[str]
+    auto_select_live_contracts: bool
     target_market_query_groups: list[str]
     target_market_status: str
     target_market_discovery_pages: int
@@ -207,7 +208,12 @@ class Settings:
             kalshi_private_key_path=os.getenv("KALSHI_PRIVATE_KEY_PATH", ""),
             target_market_tickers=_as_market_ids(os.getenv("TARGET_MARKET_TICKERS")),
             target_event_tickers=_as_market_ids(os.getenv("TARGET_EVENT_TICKERS")),
-            target_series_tickers=_as_market_ids(os.getenv("TARGET_SERIES_TICKERS")),
+            target_series_tickers=_as_market_ids(
+                os.getenv("TARGET_SERIES_TICKERS", "KXHIGHNY,KXBTC15M")
+            ),
+            auto_select_live_contracts=_as_bool(
+                os.getenv("AUTO_SELECT_LIVE_CONTRACTS"), True
+            ),
             target_market_query_groups=_as_groups(
                 os.getenv(
                     "TARGET_MARKET_QUERY_GROUPS",

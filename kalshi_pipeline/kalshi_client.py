@@ -89,6 +89,8 @@ class KalshiClient:
             rows = self._fetch_markets_by_ticker(self.settings.target_market_tickers[:limit])
         else:
             rows = self._discover_target_markets(limit=limit)
+            if self.settings.auto_select_live_contracts:
+                rows = self._select_live_contract_rows(rows)
         markets: list[Market] = []
         for row in rows:
             ticker = row.get("ticker") or row.get("id")
@@ -211,6 +213,75 @@ class KalshiClient:
         if matched:
             return list(matched.values())[:limit]
         return []
+
+    def _select_live_contract_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        now = datetime.now(timezone.utc)
+
+        weather_rows = [
+            row
+            for row in rows
+            if str(row.get("series_ticker", "")).upper() == "KXHIGHNY"
+            or str(row.get("ticker", "")).upper().startswith("KXHIGHNY")
+        ]
+        btc_rows = [
+            row
+            for row in rows
+            if str(row.get("series_ticker", "")).upper() == "KXBTC15M"
+            or str(row.get("ticker", "")).upper().startswith("KXBTC15M")
+        ]
+
+        selected: list[dict[str, Any]] = []
+
+        if weather_rows:
+            by_event: dict[str, list[dict[str, Any]]] = {}
+            for row in weather_rows:
+                event_key = str(row.get("event_ticker") or row.get("event") or "").strip()
+                if not event_key:
+                    event_key = str(row.get("ticker", "")).split("-")[0]
+                by_event.setdefault(event_key, []).append(row)
+
+            def event_sort_key(event_rows: list[dict[str, Any]]) -> tuple[int, float]:
+                close_times = [self._row_close_time(row) for row in event_rows]
+                known_times = [ts for ts in close_times if ts is not None]
+                if not known_times:
+                    return (2, float("inf"))
+                # event close proxy: latest close in that bracket set
+                event_close = max(known_times)
+                if event_close >= now:
+                    return (0, event_close.timestamp())
+                return (1, -event_close.timestamp())  # most recent past event last
+
+            best_event_rows = min(by_event.values(), key=event_sort_key)
+            selected.extend(best_event_rows)
+
+        if btc_rows:
+            future = [row for row in btc_rows if (self._row_close_time(row) or now) >= now]
+            if future:
+                best_btc = min(
+                    future,
+                    key=lambda row: self._row_close_time(row) or datetime.max.replace(tzinfo=timezone.utc),
+                )
+            else:
+                best_btc = max(
+                    btc_rows,
+                    key=lambda row: self._row_close_time(row) or datetime.min.replace(tzinfo=timezone.utc),
+                )
+            selected.append(best_btc)
+
+        if not selected:
+            return rows
+        unique_by_ticker: dict[str, dict[str, Any]] = {}
+        for row in selected:
+            ticker = str(row.get("ticker", "")).strip()
+            if not ticker:
+                continue
+            unique_by_ticker[ticker] = row
+        return list(unique_by_ticker.values())
+
+    def _row_close_time(self, row: dict[str, Any]) -> datetime | None:
+        return _parse_iso_datetime(row.get("close_time") or row.get("expiration_time"))
 
     def _matches_targets(self, row: dict[str, Any]) -> bool:
         ticker = str(row.get("ticker", "")).upper()
