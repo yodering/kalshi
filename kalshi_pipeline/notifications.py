@@ -32,6 +32,35 @@ def _format_prob(value: float | None) -> str:
     return f"{round(value * 100, 1)}%"
 
 
+def _signal_icon(signal_type: str) -> str:
+    signal_type_norm = signal_type.lower()
+    if signal_type_norm == "weather":
+        return "🌤️"
+    if signal_type_norm == "btc":
+        return "₿"
+    return "📊"
+
+
+def _direction_label(direction: str) -> str:
+    direction_norm = direction.lower()
+    if direction_norm == "buy_yes":
+        return "🟢 BUY YES"
+    if direction_norm == "buy_no":
+        return "🔴 BUY NO"
+    return direction.replace("_", " ").upper()
+
+
+def _order_status_icon(status: str) -> str:
+    status_norm = status.lower()
+    if status_norm == "submitted":
+        return "✅"
+    if status_norm == "simulated":
+        return "🧪"
+    if status_norm == "failed":
+        return "❌"
+    return "ℹ️"
+
+
 class TelegramNotifier:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -78,18 +107,19 @@ class TelegramNotifier:
         selected.sort(key=_signal_sort_key, reverse=True)
         top_signals = selected[:5]
         lines = [
-            f"Kalshi Bot Signal Digest | {now_utc.isoformat()}",
-            f"Total={len(signals)} | Sent={len(selected)} | MinEdge={self.settings.telegram_min_edge_bps} bps",
+            "🧠 Kalshi Bot Signal Digest",
+            f"🕒 {now_utc.isoformat()}",
+            f"📊 Total={len(signals)} | Sent={len(selected)} | MinEdge={self.settings.telegram_min_edge_bps} bps",
             "",
         ]
-        for signal in top_signals:
-            direction = signal.direction.replace("_", " ").upper()
+        for idx, signal in enumerate(top_signals, start=1):
+            icon = _signal_icon(signal.signal_type)
+            direction = _direction_label(signal.direction)
             lines.append(
                 (
-                    f"[{signal.signal_type.upper()}] {signal.market_ticker} | {direction} | "
-                    f"edge={_format_edge_bps(signal.edge_bps)} | "
-                    f"model={_format_prob(signal.model_probability)} | "
-                    f"market={_format_prob(signal.market_probability)}"
+                    f"{idx}) {icon} {signal.signal_type.upper()} • {signal.market_ticker}\n"
+                    f"   {direction} | edge={_format_edge_bps(signal.edge_bps)}\n"
+                    f"   🤖 model={_format_prob(signal.model_probability)} | 🏛️ market={_format_prob(signal.market_probability)}"
                 )
             )
         message = "\n".join(lines)
@@ -113,22 +143,24 @@ class TelegramNotifier:
         simulated = sum(1 for order in orders if order.status == "simulated")
         failed = sum(1 for order in orders if order.status == "failed")
         lines = [
-            f"Kalshi Bot Paper Executions | {now_utc.isoformat()}",
-            f"Orders={len(orders)} | Submitted={submitted} | Simulated={simulated} | Failed={failed}",
+            "🤖 Kalshi Bot Paper Executions",
+            f"🕒 {now_utc.isoformat()}",
+            f"📦 Orders={len(orders)} | ✅ Submitted={submitted} | 🧪 Simulated={simulated} | ❌ Failed={failed}",
             "",
         ]
-        for order in orders[:5]:
+        for idx, order in enumerate(orders[:5], start=1):
             reason_suffix = ""
             if order.status == "failed" and order.reason:
                 reason_text = order.reason.replace("\n", " ").strip()
-                if len(reason_text) > 180:
-                    reason_text = f"{reason_text[:177]}..."
-                reason_suffix = f" reason={reason_text}"
-            direction = order.direction.replace("_", " ").upper()
+                if len(reason_text) > 140:
+                    reason_text = f"{reason_text[:137]}..."
+                reason_suffix = f"\n   ⚠️ reason={reason_text}"
+            direction = _direction_label(order.direction)
+            status_icon = _order_status_icon(order.status)
             lines.append(
                 (
-                    f"[{order.status.upper()}] {order.market_ticker} | {direction} | "
-                    f"side={order.side.upper()} | count={order.count} | px={order.limit_price_cents}c"
+                    f"{idx}) {status_icon} {order.market_ticker}\n"
+                    f"   {direction} | side={order.side.upper()} | qty={order.count} | px={order.limit_price_cents}c | status={order.status.upper()}"
                     f"{reason_suffix}"
                 )
             )
