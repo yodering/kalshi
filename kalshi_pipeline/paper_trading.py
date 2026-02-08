@@ -8,6 +8,7 @@ from .config import Settings
 from .db import PostgresStore
 from .kalshi_client import KalshiClient
 from .models import MarketSnapshot, PaperTradeOrder, SignalRecord
+from .order_utils import as_int, extract_order_status, extract_queue_positions
 from .risk import compute_order_size
 
 logger = logging.getLogger(__name__)
@@ -115,93 +116,6 @@ def _find_arbitrage(book: dict[str, int | None]) -> dict[str, int] | None:
         "no_price": no_ask,
         "profit_per_contract": 100 - total_cost,
     }
-
-
-def _normalize_order_status(raw_status: object) -> str:
-    status = str(raw_status or "").strip().lower()
-    if not status:
-        return "submitted"
-    if status in {"resting", "open", "pending", "submitted"}:
-        return "submitted"
-    if status in {"partially_filled", "partially-filled"}:
-        return "partially_filled"
-    if status in {"filled", "executed", "complete", "completed", "matched"}:
-        return "filled"
-    if status in {"canceled", "cancelled", "expired", "voided"}:
-        return "canceled"
-    if status in {"failed", "rejected", "error"}:
-        return "failed"
-    return status
-
-
-def _extract_order_status(payload: dict[str, Any]) -> str:
-    candidates = [
-        payload.get("status"),
-        payload.get("order_status"),
-    ]
-    order_obj = payload.get("order")
-    if isinstance(order_obj, dict):
-        candidates.extend([order_obj.get("status"), order_obj.get("order_status")])
-    for candidate in candidates:
-        normalized = _normalize_order_status(candidate)
-        if normalized:
-            return normalized
-    return "submitted"
-
-
-def _as_int(value: object) -> int | None:
-    try:
-        if value is None:
-            return None
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _extract_queue_positions(payload: dict[str, Any]) -> dict[str, int]:
-    mapping: dict[str, int] = {}
-
-    def _record(key: object, value: object) -> None:
-        if key is None:
-            return
-        position = _as_int(value)
-        if position is None:
-            return
-        text = str(key).strip()
-        if not text:
-            return
-        mapping[text] = position
-
-    def _visit_node(node: object, parent_key: str | None = None) -> None:
-        if isinstance(node, dict):
-            queue_position = node.get("queue_position")
-            if queue_position is None:
-                queue_position = node.get("position")
-            if queue_position is not None:
-                aliases = [
-                    parent_key,
-                    node.get("order_id"),
-                    node.get("external_order_id"),
-                    node.get("market_ticker"),
-                    node.get("ticker"),
-                ]
-                for alias in aliases:
-                    _record(alias, queue_position)
-            for key, value in node.items():
-                if isinstance(value, (dict, list)):
-                    _visit_node(value, str(key))
-                else:
-                    if key in {"queue_position", "position"}:
-                        _record(parent_key or key, value)
-        elif isinstance(node, list):
-            for item in node:
-                _visit_node(item, parent_key)
-
-    root = payload.get("queue_positions") if isinstance(payload, dict) else None
-    if root is None:
-        root = payload
-    _visit_node(root)
-    return mapping
 
 
 class PaperTradingEngine:
@@ -493,7 +407,7 @@ class PaperTradingEngine:
                 stats["paper_order_events_inserted"] += 1
                 continue
 
-            normalized_status = _extract_order_status(payload)
+            normalized_status = extract_order_status(payload)
             last_event = latest_events.get(order_id, {})
             last_status = str(last_event.get("status") or "")
             is_open_status = normalized_status in {"submitted", "partially_filled"}
@@ -558,7 +472,7 @@ class PaperTradingEngine:
                     base_url=self.settings.paper_trading_base_url,
                 )
                 if isinstance(queue_payload, dict):
-                    queue_positions = _extract_queue_positions(queue_payload)
+                    queue_positions = extract_queue_positions(queue_payload)
             except Exception:
                 logger.warning("paper_trade_queue_positions_failed", exc_info=True)
 
@@ -581,7 +495,7 @@ class PaperTradingEngine:
 
             last_event = latest_events.get(order_id, {})
             last_status = str(last_event.get("status") or "")
-            last_queue = _as_int(last_event.get("queue_position"))
+            last_queue = as_int(last_event.get("queue_position"))
             if queue_position is not None and (last_status != "resting" or last_queue != queue_position):
                 self.store.insert_order_event(
                     order_id=order_id,
@@ -664,7 +578,7 @@ class PaperTradingEngine:
             )
             if new_price is None:
                 continue
-            old_price = _as_int(order.get("limit_price_cents"))
+            old_price = as_int(order.get("limit_price_cents"))
             if old_price is not None and new_price == old_price:
                 continue
             refreshed = self._submit_order(
