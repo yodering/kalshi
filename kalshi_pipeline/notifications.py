@@ -20,6 +20,18 @@ def _signal_sort_key(signal: SignalRecord) -> float:
     return abs(signal.edge_bps or 0.0)
 
 
+def _format_edge_bps(value: float | None) -> str:
+    edge = value or 0.0
+    sign = "+" if edge > 0 else ""
+    return f"{sign}{round(edge, 2)} bps"
+
+
+def _format_prob(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{round(value * 100, 1)}%"
+
+
 class TelegramNotifier:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -66,12 +78,19 @@ class TelegramNotifier:
         selected.sort(key=_signal_sort_key, reverse=True)
         top_signals = selected[:5]
         lines = [
-            f"Kalshi bot signal update ({now_utc.isoformat()})",
-            f"signals={len(signals)} selected={len(selected)}",
+            f"Kalshi Bot Signal Digest | {now_utc.isoformat()}",
+            f"Total={len(signals)} | Sent={len(selected)} | MinEdge={self.settings.telegram_min_edge_bps} bps",
+            "",
         ]
         for signal in top_signals:
+            direction = signal.direction.replace("_", " ").upper()
             lines.append(
-                f"{signal.signal_type}:{signal.market_ticker} {signal.direction} edge_bps={round(signal.edge_bps or 0.0, 2)}"
+                (
+                    f"[{signal.signal_type.upper()}] {signal.market_ticker} | {direction} | "
+                    f"edge={_format_edge_bps(signal.edge_bps)} | "
+                    f"model={_format_prob(signal.model_probability)} | "
+                    f"market={_format_prob(signal.market_probability)}"
+                )
             )
         message = "\n".join(lines)
         status, metadata = self._send_message(message)
@@ -94,8 +113,9 @@ class TelegramNotifier:
         simulated = sum(1 for order in orders if order.status == "simulated")
         failed = sum(1 for order in orders if order.status == "failed")
         lines = [
-            f"Kalshi bot paper executions ({now_utc.isoformat()})",
-            f"orders={len(orders)} submitted={submitted} simulated={simulated} failed={failed}",
+            f"Kalshi Bot Paper Executions | {now_utc.isoformat()}",
+            f"Orders={len(orders)} | Submitted={submitted} | Simulated={simulated} | Failed={failed}",
+            "",
         ]
         for order in orders[:5]:
             reason_suffix = ""
@@ -104,8 +124,13 @@ class TelegramNotifier:
                 if len(reason_text) > 180:
                     reason_text = f"{reason_text[:177]}..."
                 reason_suffix = f" reason={reason_text}"
+            direction = order.direction.replace("_", " ").upper()
             lines.append(
-                f"{order.market_ticker} {order.direction} side={order.side} count={order.count} price={order.limit_price_cents} status={order.status}{reason_suffix}"
+                (
+                    f"[{order.status.upper()}] {order.market_ticker} | {direction} | "
+                    f"side={order.side.upper()} | count={order.count} | px={order.limit_price_cents}c"
+                    f"{reason_suffix}"
+                )
             )
         message = "\n".join(lines)
         status, metadata = self._send_message(message)
