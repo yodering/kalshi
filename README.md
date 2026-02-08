@@ -5,7 +5,7 @@ Minimal Week 1 data pipeline for Kalshi market ingestion with:
 - Kalshi client wiring with signed live requests
 - Market and snapshot schema in PostgreSQL
 - Open-Meteo ensemble ingestion for NYC weather
-- BTC spot ingestion from Binance, Coinbase, and Kraken
+- BTC spot ingestion from configurable sources (Coinbase/Kraken/Bitstamp core; Binance optional)
 - Weather/BTC signal scaffolding (no trade execution yet)
 - Historical backfill on startup
 - Polling loop with persistent storage
@@ -87,6 +87,9 @@ python3 -m kalshi_pipeline.main discover-targets
 - `WEATHER_FORECAST_DAYS`: how far ahead to request weather data
 - `BTC_ENABLED`: enable BTC spot collectors
 - `BTC_SYMBOL`: symbol label stored in DB (`BTCUSD` by default)
+- `BTC_ENABLED_SOURCES`: comma-separated BTC price sources to query (default `coinbase,kraken,bitstamp`)
+- `BTC_CORE_SOURCES`: comma-separated core sources used for fair-value composite (default `coinbase,kraken,bitstamp`)
+- `BTC_MIN_CORE_SOURCES`: minimum core sources required to emit BTC signals (default `2`)
 - `BTC_MOMENTUM_LOOKBACK_MINUTES`: lookback used in BTC momentum signal
 - `SIGNAL_MIN_EDGE_BPS`: minimum edge for actionable direction
 - `SIGNAL_STORE_ALL`: store flat signals too (`true` by default)

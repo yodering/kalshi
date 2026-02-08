@@ -35,6 +35,20 @@ def _as_list(value: str | None) -> list[str]:
     return items
 
 
+def _as_btc_sources(value: str | None, default: list[str]) -> list[str]:
+    allowed = {"binance", "coinbase", "kraken", "bitstamp"}
+    raw_items = _as_list(value) if value is not None else list(default)
+    normalized: list[str] = []
+    for item in raw_items:
+        source = item.strip().lower()
+        if source not in allowed:
+            continue
+        if source in normalized:
+            continue
+        normalized.append(source)
+    return normalized
+
+
 def _as_market_ids(value: str | None) -> list[str]:
     if value is None:
         return []
@@ -220,6 +234,9 @@ class Settings:
     weather_forecast_days: int
     btc_enabled: bool
     btc_symbol: str
+    btc_enabled_sources: list[str]
+    btc_core_sources: list[str]
+    btc_min_core_sources: int
     btc_momentum_lookback_minutes: int
     signal_min_edge_bps: int
     signal_store_all: bool
@@ -227,6 +244,29 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         database_url, database_url_source = resolve_database_url()
+        btc_enabled_sources = _as_btc_sources(
+            os.getenv("BTC_ENABLED_SOURCES"),
+            ["coinbase", "kraken", "bitstamp"],
+        )
+        if not btc_enabled_sources:
+            btc_enabled_sources = ["coinbase", "kraken", "bitstamp"]
+
+        btc_core_sources = _as_btc_sources(
+            os.getenv("BTC_CORE_SOURCES"),
+            ["coinbase", "kraken", "bitstamp"],
+        )
+        btc_core_sources = [source for source in btc_core_sources if source in btc_enabled_sources]
+        if not btc_core_sources:
+            btc_core_sources = [source for source in btc_enabled_sources if source != "binance"]
+        if not btc_core_sources:
+            btc_core_sources = list(btc_enabled_sources)
+
+        btc_min_core_sources = _as_int(os.getenv("BTC_MIN_CORE_SOURCES"), 2)
+        if btc_min_core_sources < 1:
+            btc_min_core_sources = 1
+        if btc_min_core_sources > len(btc_core_sources):
+            btc_min_core_sources = len(btc_core_sources)
+
         return cls(
             database_url=database_url,
             database_url_source=database_url_source,
@@ -273,6 +313,9 @@ class Settings:
             weather_forecast_days=_as_int(os.getenv("WEATHER_FORECAST_DAYS"), 2),
             btc_enabled=_as_bool(os.getenv("BTC_ENABLED"), True),
             btc_symbol=os.getenv("BTC_SYMBOL", "BTCUSD").strip() or "BTCUSD",
+            btc_enabled_sources=btc_enabled_sources,
+            btc_core_sources=btc_core_sources,
+            btc_min_core_sources=btc_min_core_sources,
             btc_momentum_lookback_minutes=_as_int(
                 os.getenv("BTC_MOMENTUM_LOOKBACK_MINUTES"), 5
             ),

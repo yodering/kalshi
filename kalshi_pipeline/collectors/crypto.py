@@ -20,6 +20,103 @@ def _as_float(value: object) -> float | None:
         return None
 
 
+def _fetch_binance(
+    client: requests.Session, settings: Settings, current_utc: datetime
+) -> CryptoSpotTick | None:
+    response = client.get(
+        "https://api.binance.com/api/v3/ticker/price",
+        params={"symbol": "BTCUSDT"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    price = _as_float(payload.get("price"))
+    if price is None:
+        return None
+    return CryptoSpotTick(
+        ts=current_utc,
+        source="binance",
+        symbol=settings.btc_symbol,
+        price_usd=price,
+        raw_json=payload if isinstance(payload, dict) else {},
+    )
+
+
+def _fetch_coinbase(
+    client: requests.Session, settings: Settings, current_utc: datetime
+) -> CryptoSpotTick | None:
+    response = client.get(
+        "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    price = _as_float(payload.get("price"))
+    if price is None:
+        return None
+    return CryptoSpotTick(
+        ts=current_utc,
+        source="coinbase",
+        symbol=settings.btc_symbol,
+        price_usd=price,
+        raw_json=payload if isinstance(payload, dict) else {},
+    )
+
+
+def _fetch_kraken(
+    client: requests.Session, settings: Settings, current_utc: datetime
+) -> CryptoSpotTick | None:
+    response = client.get(
+        "https://api.kraken.com/0/public/Ticker",
+        params={"pair": "XBTUSD"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    price = None
+    if isinstance(payload, dict):
+        result = payload.get("result", {})
+        if isinstance(result, dict):
+            for value in result.values():
+                if not isinstance(value, dict):
+                    continue
+                close_values = value.get("c")
+                if isinstance(close_values, list) and close_values:
+                    price = _as_float(close_values[0])
+                    if price is not None:
+                        break
+    if price is None:
+        return None
+    return CryptoSpotTick(
+        ts=current_utc,
+        source="kraken",
+        symbol=settings.btc_symbol,
+        price_usd=price,
+        raw_json=payload if isinstance(payload, dict) else {},
+    )
+
+
+def _fetch_bitstamp(
+    client: requests.Session, settings: Settings, current_utc: datetime
+) -> CryptoSpotTick | None:
+    response = client.get(
+        "https://www.bitstamp.net/api/v2/ticker/btcusd/",
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    price = _as_float(payload.get("last"))
+    if price is None:
+        return None
+    return CryptoSpotTick(
+        ts=current_utc,
+        source="bitstamp",
+        symbol=settings.btc_symbol,
+        price_usd=price,
+        raw_json=payload if isinstance(payload, dict) else {},
+    )
+
+
 def fetch_btc_spot_ticks(
     settings: Settings,
     *,
@@ -29,117 +126,24 @@ def fetch_btc_spot_ticks(
     current_utc = now_utc or datetime.now(timezone.utc)
     client = session or requests.Session()
     ticks: list[CryptoSpotTick] = []
-
-    # Binance can be geo-restricted in some cloud regions; failure should not stop collection.
-    try:
-        binance_resp = client.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": "BTCUSDT"},
-            timeout=10,
-        )
-        binance_resp.raise_for_status()
-        binance_payload = binance_resp.json()
-        binance_price = _as_float(binance_payload.get("price"))
-        if binance_price is not None:
-            ticks.append(
-                CryptoSpotTick(
-                    ts=current_utc,
-                    source="binance",
-                    symbol=settings.btc_symbol,
-                    price_usd=binance_price,
-                    raw_json=binance_payload if isinstance(binance_payload, dict) else {},
-                )
-            )
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        logger.warning("btc_source_failed source=binance status=%s", status)
-    except requests.RequestException:
-        logger.warning("btc_source_failed source=binance", exc_info=True)
-
-    try:
-        coinbase_resp = client.get(
-            "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
-            timeout=10,
-        )
-        coinbase_resp.raise_for_status()
-        coinbase_payload = coinbase_resp.json()
-        coinbase_price = _as_float(coinbase_payload.get("price"))
-        if coinbase_price is not None:
-            ticks.append(
-                CryptoSpotTick(
-                    ts=current_utc,
-                    source="coinbase",
-                    symbol=settings.btc_symbol,
-                    price_usd=coinbase_price,
-                    raw_json=coinbase_payload if isinstance(coinbase_payload, dict) else {},
-                )
-            )
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        logger.warning("btc_source_failed source=coinbase status=%s", status)
-    except requests.RequestException:
-        logger.warning("btc_source_failed source=coinbase", exc_info=True)
-
-    try:
-        kraken_resp = client.get(
-            "https://api.kraken.com/0/public/Ticker",
-            params={"pair": "XBTUSD"},
-            timeout=10,
-        )
-        kraken_resp.raise_for_status()
-        kraken_payload = kraken_resp.json()
-        kraken_price = None
-        if isinstance(kraken_payload, dict):
-            result = kraken_payload.get("result", {})
-            if isinstance(result, dict):
-                for value in result.values():
-                    if not isinstance(value, dict):
-                        continue
-                    close_values = value.get("c")
-                    if isinstance(close_values, list) and close_values:
-                        kraken_price = _as_float(close_values[0])
-                        if kraken_price is not None:
-                            break
-        if kraken_price is not None:
-            ticks.append(
-                CryptoSpotTick(
-                    ts=current_utc,
-                    source="kraken",
-                    symbol=settings.btc_symbol,
-                    price_usd=kraken_price,
-                    raw_json=kraken_payload if isinstance(kraken_payload, dict) else {},
-                )
-            )
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        logger.warning("btc_source_failed source=kraken status=%s", status)
-    except requests.RequestException:
-        logger.warning("btc_source_failed source=kraken", exc_info=True)
-
-    # Lightweight additional fallback.
-    if not ticks:
+    source_fetchers = {
+        "binance": _fetch_binance,
+        "coinbase": _fetch_coinbase,
+        "kraken": _fetch_kraken,
+        "bitstamp": _fetch_bitstamp,
+    }
+    for source in settings.btc_enabled_sources:
+        fetcher = source_fetchers.get(source)
+        if fetcher is None:
+            continue
         try:
-            bitstamp_resp = client.get(
-                "https://www.bitstamp.net/api/v2/ticker/btcusd/",
-                timeout=10,
-            )
-            bitstamp_resp.raise_for_status()
-            bitstamp_payload = bitstamp_resp.json()
-            bitstamp_price = _as_float(bitstamp_payload.get("last"))
-            if bitstamp_price is not None:
-                ticks.append(
-                    CryptoSpotTick(
-                        ts=current_utc,
-                        source="bitstamp",
-                        symbol=settings.btc_symbol,
-                        price_usd=bitstamp_price,
-                        raw_json=bitstamp_payload if isinstance(bitstamp_payload, dict) else {},
-                    )
-                )
+            tick = fetcher(client, settings, current_utc)
+            if tick is not None:
+                ticks.append(tick)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
-            logger.warning("btc_source_failed source=bitstamp status=%s", status)
+            logger.warning("btc_source_failed source=%s status=%s", source, status)
         except requests.RequestException:
-            logger.warning("btc_source_failed source=bitstamp", exc_info=True)
+            logger.warning("btc_source_failed source=%s", source, exc_info=True)
 
     return ticks

@@ -29,12 +29,57 @@ def _median_price(ticks: list[CryptoSpotTick]) -> float | None:
     return float(statistics.median(prices))
 
 
-def _price_at_or_before(ticks: list[CryptoSpotTick], target_ts: datetime) -> float | None:
-    eligible = [tick for tick in ticks if tick.ts <= target_ts]
-    if not eligible:
-        return None
-    latest_ts = max(tick.ts for tick in eligible)
-    return _median_price([tick for tick in eligible if tick.ts == latest_ts])
+def _source_prices_at_timestamp(
+    ticks: list[CryptoSpotTick], target_ts: datetime
+) -> dict[str, float]:
+    prices: dict[str, float] = {}
+    for tick in ticks:
+        if tick.ts != target_ts:
+            continue
+        if tick.price_usd <= 0:
+            continue
+        prices[tick.source] = tick.price_usd
+    return prices
+
+
+def _latest_source_prices(
+    ticks: list[CryptoSpotTick],
+) -> tuple[datetime | None, dict[str, float]]:
+    if not ticks:
+        return None, {}
+    latest_ts = max(tick.ts for tick in ticks)
+    return latest_ts, _source_prices_at_timestamp(ticks, latest_ts)
+
+
+def _median_from_sources(
+    source_prices: dict[str, float], ordered_sources: list[str]
+) -> tuple[float | None, list[str]]:
+    used_sources = [source for source in ordered_sources if source in source_prices]
+    if not used_sources:
+        return None, []
+    values = [source_prices[source] for source in used_sources]
+    return float(statistics.median(values)), used_sources
+
+
+def _anchor_core_price(
+    ticks: list[CryptoSpotTick],
+    target_ts: datetime,
+    core_sources: list[str],
+    min_core_sources: int,
+) -> tuple[float | None, datetime | None, list[str]]:
+    candidate_timestamps = sorted(
+        {tick.ts for tick in ticks if tick.ts <= target_ts},
+        reverse=True,
+    )
+    for timestamp in candidate_timestamps:
+        source_prices = _source_prices_at_timestamp(ticks, timestamp)
+        price, used_sources = _median_from_sources(source_prices, core_sources)
+        if price is None:
+            continue
+        if len(used_sources) < min_core_sources:
+            continue
+        return price, timestamp, used_sources
+    return None, None, []
 
 
 def _direction(edge_bps: float | None, min_edge_bps: int) -> str:
@@ -60,26 +105,46 @@ def build_btc_signals(
         return []
 
     # Prefer fresh ticks from this run; fall back to latest from DB history.
-    latest_price = _median_price(current_ticks)
-    if latest_price is None and recent_ticks:
-        latest_ts = max(tick.ts for tick in recent_ticks)
-        latest_price = _median_price([tick for tick in recent_ticks if tick.ts == latest_ts])
+    active_ticks = current_ticks if current_ticks else recent_ticks
+    latest_tick_ts, latest_source_prices = _latest_source_prices(active_ticks)
+    if latest_tick_ts is None or not latest_source_prices:
+        return []
+
+    latest_price, latest_core_sources = _median_from_sources(
+        latest_source_prices, settings.btc_core_sources
+    )
     if latest_price is None:
+        return []
+    if len(latest_core_sources) < settings.btc_min_core_sources:
         return []
 
     lookback_target = now_utc - timedelta(minutes=settings.btc_momentum_lookback_minutes)
-    anchor_price = _price_at_or_before(recent_ticks, lookback_target)
+    anchor_price, anchor_ts, anchor_core_sources = _anchor_core_price(
+        recent_ticks,
+        lookback_target,
+        settings.btc_core_sources,
+        settings.btc_min_core_sources,
+    )
     if anchor_price is None:
         anchor_price = latest_price
+        anchor_ts = latest_tick_ts
+        anchor_core_sources = latest_core_sources
 
     momentum_bps = ((latest_price / anchor_price) - 1.0) * 10000 if anchor_price else 0.0
     fair_shift = max(-0.35, min(0.35, momentum_bps / 800))
     fair_yes_prob = max(0.01, min(0.99, 0.5 + fair_shift))
 
-    prices_this_tick = [tick.price_usd for tick in current_ticks if tick.price_usd > 0]
+    prices_this_tick = [latest_source_prices[source] for source in latest_core_sources]
     cross_source_spread_bps = 0.0
     if len(prices_this_tick) >= 2 and latest_price > 0:
         cross_source_spread_bps = ((max(prices_this_tick) - min(prices_this_tick)) / latest_price) * 10000
+
+    binance_basis_bps = None
+    binance_price = latest_source_prices.get("binance")
+    if binance_price is not None and latest_price > 0:
+        binance_basis_bps = ((binance_price - latest_price) / latest_price) * 10000
+
+    all_sources_observed = sorted(latest_source_prices.keys())
 
     signals: list[SignalRecord] = []
     for market in markets:
@@ -106,12 +171,19 @@ def build_btc_signals(
                 details={
                     "latest_spot": round(latest_price, 4),
                     "anchor_spot": round(anchor_price, 4),
+                    "latest_tick_ts": latest_tick_ts.isoformat(),
+                    "anchor_tick_ts": anchor_ts.isoformat() if anchor_ts else None,
+                    "core_sources_used_latest": latest_core_sources,
+                    "core_sources_used_anchor": anchor_core_sources,
+                    "all_sources_observed": all_sources_observed,
                     "momentum_bps": round(momentum_bps, 2),
                     "cross_source_spread_bps": round(cross_source_spread_bps, 2),
+                    "binance_basis_bps": round(binance_basis_bps, 2)
+                    if binance_basis_bps is not None
+                    else None,
                     "lookback_minutes": settings.btc_momentum_lookback_minutes,
                 },
                 created_at=now_utc,
             )
         )
     return signals
-

@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings = Settings.from_env()
     logger.info(
-        "startup kalshi_stub_mode=%s kalshi_base_url=%s kalshi_auth_for_public=%s database_source=%s database_target=%s target_groups=%s target_tickers=%s target_series=%s auto_select_live_contracts=%s store_raw_json=%s weather_enabled=%s btc_enabled=%s signal_min_edge_bps=%s",
+        "startup kalshi_stub_mode=%s kalshi_base_url=%s kalshi_auth_for_public=%s database_source=%s database_target=%s target_groups=%s target_tickers=%s target_series=%s auto_select_live_contracts=%s store_raw_json=%s weather_enabled=%s btc_enabled=%s btc_enabled_sources=%s btc_core_sources=%s btc_min_core_sources=%s signal_min_edge_bps=%s",
         settings.kalshi_stub_mode,
         settings.kalshi_base_url,
         settings.kalshi_use_auth_for_public_data,
@@ -47,6 +47,9 @@ def main(argv: list[str] | None = None) -> int:
         settings.store_raw_json,
         settings.weather_enabled,
         settings.btc_enabled,
+        ",".join(settings.btc_enabled_sources),
+        ",".join(settings.btc_core_sources),
+        settings.btc_min_core_sources,
         settings.signal_min_edge_bps,
     )
 
