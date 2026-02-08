@@ -73,3 +73,40 @@ ON signals (created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_signals_type_market
 ON signals (signal_type, market_ticker, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS paper_trade_orders (
+    id BIGSERIAL PRIMARY KEY,
+    market_ticker TEXT NOT NULL,
+    signal_type TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    side TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    limit_price_cents INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NULL,
+    external_order_id TEXT NULL,
+    request_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    response_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_trade_orders_created_at
+ON paper_trade_orders (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_paper_trade_orders_market_direction
+ON paper_trade_orders (market_ticker, direction, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS alert_events (
+    id BIGSERIAL PRIMARY KEY,
+    channel TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    market_ticker TEXT NULL,
+    message TEXT NOT NULL,
+    status TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_events_created_at
+ON alert_events (created_at DESC);

@@ -85,6 +85,41 @@ class KalshiClient:
         payload = self._request_json("GET", "/trade-api/v2/markets", params={"limit": 1})
         return {"ok": True, "mode": "live-public", "result_keys": sorted(payload.keys())}
 
+    def place_order(
+        self,
+        ticker: str,
+        side: str,
+        count: int,
+        price_cents: int,
+        *,
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_side = side.strip().lower()
+        if normalized_side not in {"yes", "no"}:
+            raise ValueError("side must be 'yes' or 'no'")
+        payload: dict[str, Any] = {
+            "ticker": ticker,
+            "action": "buy",
+            "side": normalized_side,
+            "count": int(count),
+            "type": "limit",
+            "client_order_id": (
+                f"bot-{ticker.lower().replace('-', '')[:18]}-"
+                f"{normalized_side}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+            ),
+        }
+        if normalized_side == "yes":
+            payload["yes_price"] = int(price_cents)
+        else:
+            payload["no_price"] = int(price_cents)
+        return self._request_json(
+            "POST",
+            "/trade-api/v2/portfolio/orders",
+            require_auth=True,
+            json_body=payload,
+            base_url_override=base_url,
+        )
+
     def list_markets(self, limit: int) -> list[Market]:
         if self.settings.kalshi_stub_mode:
             return generate_markets(limit)
@@ -411,11 +446,16 @@ class KalshiClient:
         path: str,
         params: dict[str, Any] | None = None,
         require_auth: bool = False,
+        json_body: dict[str, Any] | None = None,
+        base_url_override: str | None = None,
     ) -> dict[str, Any]:
-        url = f"{self.settings.kalshi_base_url.rstrip('/')}{path}"
+        base_url = (base_url_override or self.settings.kalshi_base_url).rstrip("/")
+        url = f"{base_url}{path}"
         split = urlsplit(url)
         path_for_signing = split.path or path
         headers = {"Accept": "application/json"}
+        if json_body is not None:
+            headers["Content-Type"] = "application/json"
         should_authenticate = require_auth or self.settings.kalshi_use_auth_for_public_data
         if should_authenticate:
             headers.update(self._build_auth_headers(method=method, path=path_for_signing))
@@ -423,10 +463,13 @@ class KalshiClient:
             method=method,
             url=url,
             params=params,
+            json=json_body,
             headers=headers,
             timeout=20,
         )
         response.raise_for_status()
+        if not response.content:
+            return {}
         payload = response.json()
         if isinstance(payload, dict):
             return payload

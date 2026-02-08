@@ -6,7 +6,9 @@ Minimal Week 1 data pipeline for Kalshi market ingestion with:
 - Market and snapshot schema in PostgreSQL
 - Open-Meteo ensemble ingestion for NYC weather
 - BTC spot ingestion from configurable sources (Coinbase/Kraken/Bitstamp core; Binance optional)
-- Weather/BTC signal scaffolding (no trade execution yet)
+- Weather/BTC signal generation + optional auto paper execution
+- Optional Telegram notifications
+- Optional auto paper-trade execution (simulation or Kalshi demo endpoint)
 - Historical backfill on startup
 - Polling loop with persistent storage
 - Railway-ready worker deployment
@@ -91,6 +93,23 @@ python3 -m kalshi_pipeline.main discover-targets
 - `BTC_CORE_SOURCES`: comma-separated core sources used for fair-value composite (default `coinbase,kraken,bitstamp`)
 - `BTC_MIN_CORE_SOURCES`: minimum core sources required to emit BTC signals (default `2`)
 - `BTC_MOMENTUM_LOOKBACK_MINUTES`: lookback used in BTC momentum signal
+- `PAPER_TRADING_ENABLED`: enable auto paper execution (`false` by default)
+- `PAPER_TRADING_MODE`: `simulate` or `kalshi_demo`
+- `PAPER_TRADING_BASE_URL`: paper trading API host (default `https://demo-api.kalshi.co`)
+- `PAPER_TRADE_SIGNAL_TYPES`: which signal types are tradable (`weather,btc` by default)
+- `PAPER_TRADE_MIN_EDGE_BPS`: minimum edge to place an auto paper order
+- `PAPER_TRADE_MIN_CONFIDENCE`: minimum confidence to place an auto paper order
+- `PAPER_TRADE_CONTRACT_COUNT`: fixed contracts per paper order
+- `PAPER_TRADE_MAX_ORDERS_PER_CYCLE`: cap paper orders each poll cycle
+- `PAPER_TRADE_COOLDOWN_MINUTES`: cooldown before repeating same ticker+direction
+- `PAPER_TRADE_MIN_PRICE_CENTS`: lower clamp for limit order price
+- `PAPER_TRADE_MAX_PRICE_CENTS`: upper clamp for limit order price
+- `TELEGRAM_ENABLED`: enable Telegram notifications
+- `TELEGRAM_BOT_TOKEN`: Telegram bot token
+- `TELEGRAM_CHAT_ID`: Telegram chat id
+- `TELEGRAM_NOTIFY_ACTIONABLE_ONLY`: if true, only actionable signal digest messages
+- `TELEGRAM_NOTIFY_EXECUTION_EVENTS`: if true, send paper execution digest messages
+- `TELEGRAM_MIN_EDGE_BPS`: minimum edge threshold for actionable Telegram digest filtering
 - `SIGNAL_MIN_EDGE_BPS`: minimum edge for actionable direction
 - `SIGNAL_STORE_ALL`: store flat signals too (`true` by default)
 
@@ -135,7 +154,12 @@ After any variable change, redeploy the worker service.
 - With `AUTO_SELECT_LIVE_CONTRACTS=true` and no pinned tickers:
   - KXHIGHNY: selects one live event and ingests all brackets
   - KXBTC15M: selects nearest live 15-minute contract
-- This build stores signals only; no order placement endpoints are called yet.
+- Auto paper execution is disabled by default. Enable with:
+  - `PAPER_TRADING_ENABLED=true`
+  - `PAPER_TRADING_MODE=kalshi_demo` to place demo orders automatically
+  - `PAPER_TRADING_MODE=simulate` to record "would trade" intents only
+- For `kalshi_demo` mode, keep data and order environments aligned to avoid ticker mismatches
+  between production and demo market catalogs.
 
 ## 6. Stored Tables
 
@@ -144,3 +168,5 @@ After any variable change, redeploy the worker service.
 - `weather_ensemble_samples`
 - `crypto_spot_ticks`
 - `signals`
+- `paper_trade_orders`
+- `alert_events`

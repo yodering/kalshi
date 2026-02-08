@@ -55,3 +55,31 @@ class SignalRecord:
     confidence: float | None
     details: dict[str, Any]
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class PaperTradeOrder:
+    market_ticker: str
+    signal_type: str
+    direction: str
+    side: str
+    count: int
+    limit_price_cents: int
+    provider: str
+    status: str
+    reason: str | None
+    external_order_id: str | None
+    request_payload: dict[str, Any]
+    response_payload: dict[str, Any]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class AlertEvent:
+    channel: str
+    event_type: str
+    market_ticker: str | None
+    message: str
+    status: str
+    metadata: dict[str, Any]
+    created_at: datetime

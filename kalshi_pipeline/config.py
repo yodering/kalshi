@@ -49,6 +49,27 @@ def _as_btc_sources(value: str | None, default: list[str]) -> list[str]:
     return normalized
 
 
+def _as_signal_types(value: str | None, default: list[str]) -> list[str]:
+    allowed = {"weather", "btc"}
+    raw_items = _as_list(value) if value is not None else list(default)
+    normalized: list[str] = []
+    for item in raw_items:
+        signal_type = item.strip().lower()
+        if signal_type not in allowed:
+            continue
+        if signal_type in normalized:
+            continue
+        normalized.append(signal_type)
+    return normalized
+
+
+def _as_paper_trading_mode(value: str | None) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"kalshi_demo", "simulate"}:
+        return normalized
+    return "simulate"
+
+
 def _as_market_ids(value: str | None) -> list[str]:
     if value is None:
         return []
@@ -238,6 +259,23 @@ class Settings:
     btc_core_sources: list[str]
     btc_min_core_sources: int
     btc_momentum_lookback_minutes: int
+    paper_trading_enabled: bool
+    paper_trading_mode: str
+    paper_trading_base_url: str
+    paper_trade_signal_types: list[str]
+    paper_trade_min_edge_bps: int
+    paper_trade_min_confidence: float
+    paper_trade_contract_count: int
+    paper_trade_max_orders_per_cycle: int
+    paper_trade_cooldown_minutes: int
+    paper_trade_min_price_cents: int
+    paper_trade_max_price_cents: int
+    telegram_enabled: bool
+    telegram_bot_token: str
+    telegram_chat_id: str
+    telegram_notify_actionable_only: bool
+    telegram_notify_execution_events: bool
+    telegram_min_edge_bps: int
     signal_min_edge_bps: int
     signal_store_all: bool
 
@@ -266,6 +304,47 @@ class Settings:
             btc_min_core_sources = 1
         if btc_min_core_sources > len(btc_core_sources):
             btc_min_core_sources = len(btc_core_sources)
+
+        paper_trade_signal_types = _as_signal_types(
+            os.getenv("PAPER_TRADE_SIGNAL_TYPES"), ["weather", "btc"]
+        )
+        if not paper_trade_signal_types:
+            paper_trade_signal_types = ["weather", "btc"]
+
+        paper_trade_contract_count = _as_int(os.getenv("PAPER_TRADE_CONTRACT_COUNT"), 2)
+        if paper_trade_contract_count < 1:
+            paper_trade_contract_count = 1
+        if paper_trade_contract_count > 50:
+            paper_trade_contract_count = 50
+
+        paper_trade_max_orders_per_cycle = _as_int(
+            os.getenv("PAPER_TRADE_MAX_ORDERS_PER_CYCLE"), 2
+        )
+        if paper_trade_max_orders_per_cycle < 1:
+            paper_trade_max_orders_per_cycle = 1
+        if paper_trade_max_orders_per_cycle > 20:
+            paper_trade_max_orders_per_cycle = 20
+
+        paper_trade_cooldown_minutes = _as_int(os.getenv("PAPER_TRADE_COOLDOWN_MINUTES"), 30)
+        if paper_trade_cooldown_minutes < 1:
+            paper_trade_cooldown_minutes = 1
+
+        paper_trade_min_price_cents = _as_int(os.getenv("PAPER_TRADE_MIN_PRICE_CENTS"), 5)
+        paper_trade_max_price_cents = _as_int(os.getenv("PAPER_TRADE_MAX_PRICE_CENTS"), 95)
+        if paper_trade_min_price_cents < 1:
+            paper_trade_min_price_cents = 1
+        if paper_trade_max_price_cents > 99:
+            paper_trade_max_price_cents = 99
+        if paper_trade_min_price_cents > paper_trade_max_price_cents:
+            paper_trade_min_price_cents = min(paper_trade_max_price_cents, 5)
+
+        paper_trade_min_confidence = _as_float(
+            os.getenv("PAPER_TRADE_MIN_CONFIDENCE"), 0.25
+        )
+        if paper_trade_min_confidence < 0.0:
+            paper_trade_min_confidence = 0.0
+        if paper_trade_min_confidence > 1.0:
+            paper_trade_min_confidence = 1.0
 
         return cls(
             database_url=database_url,
@@ -319,6 +398,29 @@ class Settings:
             btc_momentum_lookback_minutes=_as_int(
                 os.getenv("BTC_MOMENTUM_LOOKBACK_MINUTES"), 5
             ),
+            paper_trading_enabled=_as_bool(os.getenv("PAPER_TRADING_ENABLED"), False),
+            paper_trading_mode=_as_paper_trading_mode(os.getenv("PAPER_TRADING_MODE")),
+            paper_trading_base_url=_normalize_kalshi_base_url(
+                os.getenv("PAPER_TRADING_BASE_URL", "https://demo-api.kalshi.co")
+            ),
+            paper_trade_signal_types=paper_trade_signal_types,
+            paper_trade_min_edge_bps=_as_int(os.getenv("PAPER_TRADE_MIN_EDGE_BPS"), 200),
+            paper_trade_min_confidence=paper_trade_min_confidence,
+            paper_trade_contract_count=paper_trade_contract_count,
+            paper_trade_max_orders_per_cycle=paper_trade_max_orders_per_cycle,
+            paper_trade_cooldown_minutes=paper_trade_cooldown_minutes,
+            paper_trade_min_price_cents=paper_trade_min_price_cents,
+            paper_trade_max_price_cents=paper_trade_max_price_cents,
+            telegram_enabled=_as_bool(os.getenv("TELEGRAM_ENABLED"), False),
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+            telegram_notify_actionable_only=_as_bool(
+                os.getenv("TELEGRAM_NOTIFY_ACTIONABLE_ONLY"), True
+            ),
+            telegram_notify_execution_events=_as_bool(
+                os.getenv("TELEGRAM_NOTIFY_EXECUTION_EVENTS"), True
+            ),
+            telegram_min_edge_bps=_as_int(os.getenv("TELEGRAM_MIN_EDGE_BPS"), 150),
             signal_min_edge_bps=_as_int(os.getenv("SIGNAL_MIN_EDGE_BPS"), 150),
             signal_store_all=_as_bool(os.getenv("SIGNAL_STORE_ALL"), True),
         )

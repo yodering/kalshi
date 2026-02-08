@@ -10,6 +10,8 @@ from .config import Settings
 from .db import PostgresStore
 from .kalshi_client import KalshiClient
 from .models import MarketSnapshot
+from .notifications import TelegramNotifier
+from .paper_trading import PaperTradingEngine
 from .signals.btc import build_btc_signals
 from .signals.weather import build_weather_signals
 
@@ -22,6 +24,8 @@ class DataPipeline:
         self.client = client
         self.store = store
         self.did_backfill = False
+        self.paper_trader = PaperTradingEngine(settings, client, store)
+        self.telegram_notifier = TelegramNotifier(settings)
 
     def run_once(self) -> dict[str, int]:
         now = datetime.now(timezone.utc)
@@ -35,6 +39,18 @@ class DataPipeline:
                 "current_snapshots_inserted": 0,
                 "historical_snapshots_inserted": 0,
                 "current_snapshot_failures": 0,
+                "weather_samples_inserted": 0,
+                "crypto_ticks_inserted": 0,
+                "signals_generated": 0,
+                "signals_inserted": 0,
+                "paper_orders_candidates": 0,
+                "paper_orders_attempted": 0,
+                "paper_orders_submitted": 0,
+                "paper_orders_simulated": 0,
+                "paper_orders_failed": 0,
+                "paper_orders_skipped": 0,
+                "paper_orders_recorded": 0,
+                "alert_events_inserted": 0,
             }
         logger.info("target_markets %s", ",".join(market.ticker for market in markets))
         ticker_to_id = self.store.upsert_markets(markets)
@@ -81,9 +97,9 @@ class DataPipeline:
 
         generated_signals = 0
         inserted_signals = 0
+        all_signals = []
         try:
             snapshots_by_ticker = {snapshot.ticker: snapshot for snapshot in current_snapshots}
-            all_signals = []
             if weather_samples:
                 all_signals.extend(
                     build_weather_signals(
@@ -115,8 +131,34 @@ class DataPipeline:
                 inserted_signals = self.store.insert_signals(all_signals)
         except Exception:
             logger.exception("signal_generation_failed")
+            snapshots_by_ticker = {snapshot.ticker: snapshot for snapshot in current_snapshots}
 
-        return {
+        paper_stats = {
+            "paper_orders_candidates": 0,
+            "paper_orders_attempted": 0,
+            "paper_orders_submitted": 0,
+            "paper_orders_simulated": 0,
+            "paper_orders_failed": 0,
+            "paper_orders_skipped": 0,
+            "paper_orders_recorded": 0,
+        }
+        paper_orders = []
+        try:
+            paper_orders, paper_stats = self.paper_trader.execute(
+                all_signals, snapshots_by_ticker, now
+            )
+        except Exception:
+            logger.exception("paper_trading_failed")
+
+        alert_events_inserted = 0
+        try:
+            alert_events = self.telegram_notifier.notify(now, all_signals, paper_orders)
+            if alert_events:
+                alert_events_inserted = self.store.insert_alert_events(alert_events)
+        except Exception:
+            logger.exception("alerting_failed")
+
+        stats = {
             "markets_seen": len(markets),
             "current_snapshots_inserted": inserted_current,
             "historical_snapshots_inserted": inserted_historical,
@@ -125,7 +167,10 @@ class DataPipeline:
             "crypto_ticks_inserted": inserted_crypto_ticks,
             "signals_generated": generated_signals,
             "signals_inserted": inserted_signals,
+            "alert_events_inserted": alert_events_inserted,
         }
+        stats.update(paper_stats)
+        return stats
 
     def run_forever(self) -> None:
         while True:

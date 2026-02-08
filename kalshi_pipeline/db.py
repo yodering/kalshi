@@ -7,9 +7,11 @@ from urllib.parse import urlsplit
 import psycopg
 
 from .models import (
+    AlertEvent,
     CryptoSpotTick,
     Market,
     MarketSnapshot,
+    PaperTradeOrder,
     SignalRecord,
     WeatherEnsembleSample,
 )
@@ -225,6 +227,110 @@ class PostgresStore:
                         signal.confidence,
                         psycopg.types.json.Jsonb(signal.details if self.store_raw_json else signal.details),
                         signal.created_at,
+                    ),
+                )
+                if cur.fetchone() is not None:
+                    inserted_count += 1
+        self.conn.commit()
+        return inserted_count
+
+    def has_recent_paper_order(
+        self, market_ticker: str, direction: str, since_ts: datetime
+    ) -> bool:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM paper_trade_orders
+                WHERE market_ticker = %s
+                  AND direction = %s
+                  AND created_at >= %s
+                LIMIT 1
+                """,
+                (market_ticker, direction, since_ts),
+            )
+            row = cur.fetchone()
+        return row is not None
+
+    def insert_paper_trade_orders(self, orders: list[PaperTradeOrder]) -> int:
+        inserted_count = 0
+        with self.conn.cursor() as cur:
+            for order in orders:
+                cur.execute(
+                    """
+                    INSERT INTO paper_trade_orders (
+                        market_ticker,
+                        signal_type,
+                        direction,
+                        side,
+                        count,
+                        limit_price_cents,
+                        provider,
+                        status,
+                        reason,
+                        external_order_id,
+                        request_payload,
+                        response_payload,
+                        created_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        order.market_ticker,
+                        order.signal_type,
+                        order.direction,
+                        order.side,
+                        order.count,
+                        order.limit_price_cents,
+                        order.provider,
+                        order.status,
+                        order.reason,
+                        order.external_order_id,
+                        psycopg.types.json.Jsonb(
+                            order.request_payload if self.store_raw_json else order.request_payload
+                        ),
+                        psycopg.types.json.Jsonb(
+                            order.response_payload
+                            if self.store_raw_json
+                            else order.response_payload
+                        ),
+                        order.created_at,
+                    ),
+                )
+                if cur.fetchone() is not None:
+                    inserted_count += 1
+        self.conn.commit()
+        return inserted_count
+
+    def insert_alert_events(self, events: list[AlertEvent]) -> int:
+        inserted_count = 0
+        with self.conn.cursor() as cur:
+            for event in events:
+                cur.execute(
+                    """
+                    INSERT INTO alert_events (
+                        channel,
+                        event_type,
+                        market_ticker,
+                        message,
+                        status,
+                        metadata,
+                        created_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        event.channel,
+                        event.event_type,
+                        event.market_ticker,
+                        event.message,
+                        event.status,
+                        psycopg.types.json.Jsonb(
+                            event.metadata if self.store_raw_json else event.metadata
+                        ),
+                        event.created_at,
                     ),
                 )
                 if cur.fetchone() is not None:
