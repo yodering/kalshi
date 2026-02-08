@@ -69,6 +69,35 @@ def _market_text(row: dict[str, Any]) -> str:
     return " ".join(parts).lower()
 
 
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_levels(payload: Any) -> list[tuple[int, int]]:
+    if not isinstance(payload, list):
+        return []
+    levels: list[tuple[int, int]] = []
+    for row in payload:
+        price = None
+        qty = None
+        if isinstance(row, dict):
+            price = _as_int(row.get("price"))
+            qty = _as_int(row.get("quantity") if row.get("quantity") is not None else row.get("qty"))
+        elif isinstance(row, (list, tuple)) and len(row) >= 2:
+            price = _as_int(row[0])
+            qty = _as_int(row[1])
+        if price is None or qty is None or qty <= 0:
+            continue
+        levels.append((price, qty))
+    levels.sort(key=lambda pair: pair[0], reverse=True)
+    return levels
+
+
 class KalshiClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -214,6 +243,18 @@ class KalshiClient:
             volume=_as_float(payload.get("volume")),
             raw_json=payload,
         )
+
+    def get_orderbook(self, ticker: str) -> dict[str, Any]:
+        payload = self._request_json("GET", f"/trade-api/v2/markets/{ticker}/orderbook")
+        orderbook = payload.get("orderbook", payload) if isinstance(payload, dict) else {}
+        yes_levels = _parse_levels(orderbook.get("yes") if isinstance(orderbook, dict) else None)
+        no_levels = _parse_levels(orderbook.get("no") if isinstance(orderbook, dict) else None)
+        return {
+            "yes": yes_levels,
+            "no": no_levels,
+            "source": "rest",
+            "raw_json": orderbook if isinstance(orderbook, dict) else {},
+        }
 
     def get_historical_snapshots(
         self, market: Market, start: datetime, end: datetime

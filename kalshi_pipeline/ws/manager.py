@@ -60,6 +60,10 @@ class WSManager:
         for payload in self._subscriptions:
             await self._send_json(payload)
 
+    @property
+    def is_connected(self) -> bool:
+        return self._ws is not None and not self._ws.closed
+
     async def subscribe(self, channels: list[str], tickers: list[str] | None = None) -> None:
         payload: dict[str, Any] = {"cmd": "subscribe", "channels": channels}
         if tickers:

@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from .config import Settings
+from .data.price_provider import PriceProvider
 from .kalshi_client import KalshiClient
 from .pipeline import DataPipeline
 from .ws.binance_feed import BinanceFeed
@@ -38,6 +39,16 @@ class AsyncRuntime:
         self._running = True
         self._subscribed_tickers: set[str] = set()
         self._lifecycle_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._pipeline_lock = asyncio.Lock()
+        self.price_provider = PriceProvider(
+            binance_feed=self.binance_feed,
+            coinbase_feed=self.coinbase_feed,
+            kraken_feed=self.kraken_feed,
+            kalshi_feed=None,
+            store=self.pipeline.store,
+            client=self.client,
+            btc_symbol=self.settings.btc_symbol,
+        )
 
         try:
             self.kalshi_feed = KalshiFeed(
@@ -45,9 +56,19 @@ class AsyncRuntime:
                 ws_url=build_kalshi_ws_url(self.settings.kalshi_base_url),
             )
             self.kalshi_feed.add_lifecycle_callback(self._on_lifecycle_market)
+            self.price_provider = PriceProvider(
+                binance_feed=self.binance_feed,
+                coinbase_feed=self.coinbase_feed,
+                kraken_feed=self.kraken_feed,
+                kalshi_feed=self.kalshi_feed,
+                store=self.pipeline.store,
+                client=self.client,
+                btc_symbol=self.settings.btc_symbol,
+            )
         except Exception:
             logger.exception("kalshi_ws_init_failed")
             self.kalshi_feed = None
+        self.pipeline.set_price_provider(self.price_provider)
 
     def _on_lifecycle_market(self, ticker: str, _payload: dict[str, Any]) -> None:
         if not ticker:
@@ -168,13 +189,15 @@ class AsyncRuntime:
                 self.pipeline.telegram_notifier.notify_operational_alerts, now, filtered
             )
             if events:
-                await asyncio.to_thread(self.pipeline.store.insert_alert_events, events)
+                async with self._pipeline_lock:
+                    await asyncio.to_thread(self.pipeline.store.insert_alert_events, events)
 
     async def periodic_poll_loop(self) -> None:
         while self._running:
             started = time.monotonic()
             try:
-                stats = await asyncio.to_thread(self.pipeline.run_once)
+                async with self._pipeline_lock:
+                    stats = await asyncio.to_thread(self.pipeline.run_once)
                 metrics = " ".join(f"{key}={value}" for key, value in stats.items())
                 logger.info("poll_complete %s", metrics)
             except Exception:
@@ -184,6 +207,18 @@ class AsyncRuntime:
             sleep_seconds = max(1, self.settings.poll_interval_seconds - int(elapsed))
             await asyncio.sleep(sleep_seconds)
 
+    async def btc_signal_loop(self) -> None:
+        while self._running:
+            try:
+                async with self._pipeline_lock:
+                    stats = await asyncio.to_thread(self.pipeline.run_realtime_btc_cycle)
+                if stats.get("btc_signals_generated", 0):
+                    metrics = " ".join(f"{key}={value}" for key, value in stats.items())
+                    logger.info("btc_realtime_cycle %s", metrics)
+            except Exception:
+                logger.exception("btc_realtime_cycle_failed")
+            await asyncio.sleep(max(1, self.settings.btc_signal_interval_seconds))
+
     async def command_poll_loop(self) -> None:
         while self._running:
             try:
@@ -191,7 +226,8 @@ class AsyncRuntime:
                     self.pipeline.telegram_notifier.poll_commands, self.pipeline
                 )
                 if events:
-                    await asyncio.to_thread(self.pipeline.store.insert_alert_events, events)
+                    async with self._pipeline_lock:
+                        await asyncio.to_thread(self.pipeline.store.insert_alert_events, events)
             except Exception:
                 logger.exception("telegram_command_poll_failed")
             await asyncio.sleep(2)
@@ -200,6 +236,7 @@ class AsyncRuntime:
         await self.bootstrap_subscriptions()
         tasks = [
             asyncio.create_task(self.periodic_poll_loop()),
+            asyncio.create_task(self.btc_signal_loop()),
             asyncio.create_task(self.command_poll_loop()),
             asyncio.create_task(self.lifecycle_subscriber_loop()),
             asyncio.create_task(self.ws_rest_health_loop()),

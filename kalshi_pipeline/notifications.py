@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 from .analysis.accuracy_report import generate_accuracy_report
+from .analysis.weather_backtest import (
+    check_weather_live_gates,
+    generate_weather_calibration,
+)
 from .config import Settings
 from .models import AlertEvent, PaperTradeOrder, SignalRecord
 
@@ -225,6 +229,61 @@ class TelegramNotifier:
                 f"total_pnl={report.total_pnl}\n"
                 f"sharpe_proxy={report.sharpe_ratio}"
             )
+
+        if lower.startswith("/calibration"):
+            parts = normalized.split()
+            days = 30
+            if len(parts) >= 2:
+                try:
+                    days = max(1, int(parts[1]))
+                except ValueError:
+                    days = 30
+            report = generate_weather_calibration(pipeline.store, days=days)
+            if report.n_brackets == 0:
+                return f"📊 Weather Calibration ({days}d)\nNo resolved weather bracket rows yet."
+
+            gates = check_weather_live_gates(report, pipeline.settings)
+            all_passed = all(gates.values())
+
+            lines = [
+                f"📊 Weather Calibration ({days}d)",
+                f"resolved_days={report.resolved_days} | brackets={report.n_brackets}",
+                f"model_brier={round(report.model_brier, 6) if report.model_brier is not None else 'n/a'}",
+                f"market_brier={round(report.market_brier, 6) if report.market_brier is not None else 'n/a'}",
+                f"brier_advantage={round(report.brier_advantage, 6) if report.brier_advantage is not None else 'n/a'}",
+                f"edge_hit_rate={_format_pct(report.edge_hit_rate)}",
+                f"sim_pnl=${round(report.sim_pnl_cents / 100.0, 2)}",
+                f"max_calibration_error={round(report.max_calibration_error, 6) if report.max_calibration_error is not None else 'n/a'}",
+                f"live_gates={'ALL PASSED ✅' if all_passed else 'NOT READY ❌'}",
+                f"{'✅' if gates['min_resolved_days'] else '❌'} min_resolved_days",
+                f"{'✅' if gates['min_brier_advantage'] else '❌'} min_brier_advantage",
+                f"{'✅' if gates['min_sim_profit_cents'] else '❌'} min_sim_profit_cents",
+                f"{'✅' if gates['max_calibration_error'] else '❌'} max_calibration_error",
+            ]
+            return "\n".join(lines)
+
+        if lower.startswith("/arb"):
+            parts = normalized.split()
+            days = 7
+            if len(parts) >= 2:
+                try:
+                    days = max(1, int(parts[1]))
+                except ValueError:
+                    days = 7
+            rows = pipeline.store.get_recent_bracket_arb_opportunities(days=days, limit=10)
+            if not rows:
+                return f"🎯 Bracket Arb ({days}d)\nNo opportunities detected."
+            lines = [f"🎯 Bracket Arb ({days}d) | opportunities={len(rows)}", ""]
+            for idx, row in enumerate(rows[:5], start=1):
+                total_dollars = round(float(row["profit_after_fees_cents"]) / 100.0, 2)
+                lines.append(
+                    (
+                        f"{idx}) {row['event_ticker']} [{row['arb_type']}]\n"
+                        f"   profit_after_fees=${total_dollars} | max_sets={row['max_sets']}\n"
+                        f"   executed={'✅' if row['executed'] else '❌'} | detected_at={row['detected_at']}"
+                    )
+                )
+            return "\n".join(lines)
 
         if lower.startswith("/fills"):
             parts = normalized.split()

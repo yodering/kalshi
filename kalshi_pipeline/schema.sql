@@ -95,6 +95,10 @@ CREATE TABLE IF NOT EXISTS signals (
     market_probability DOUBLE PRECISION NULL,
     edge_bps DOUBLE PRECISION NULL,
     confidence DOUBLE PRECISION NULL,
+    data_source TEXT NOT NULL DEFAULT 'rest',
+    vwap_cents DOUBLE PRECISION NULL,
+    fillable_qty INTEGER NULL,
+    liquidity_sufficient BOOLEAN NULL,
     details JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -177,6 +181,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_prediction_accuracy_signal_id_unique
 ON prediction_accuracy (signal_id)
 WHERE signal_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS bracket_arb_opportunities (
+    id BIGSERIAL PRIMARY KEY,
+    detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    event_ticker TEXT NOT NULL,
+    arb_type TEXT NOT NULL,
+    n_brackets INTEGER NOT NULL,
+    cost_cents INTEGER NOT NULL,
+    payout_cents INTEGER NOT NULL,
+    profit_cents INTEGER NOT NULL,
+    profit_after_fees_cents INTEGER NOT NULL,
+    max_sets INTEGER NOT NULL,
+    total_profit_cents INTEGER NOT NULL,
+    legs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    executed BOOLEAN NOT NULL DEFAULT FALSE,
+    execution_result JSONB NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bracket_arb_detected_at
+ON bracket_arb_opportunities (detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bracket_arb_event_ticker
+ON bracket_arb_opportunities (event_ticker, detected_at DESC);
+
 CREATE TABLE IF NOT EXISTS alert_events (
     id BIGSERIAL PRIMARY KEY,
     channel TEXT NOT NULL,
@@ -190,3 +217,8 @@ CREATE TABLE IF NOT EXISTS alert_events (
 
 CREATE INDEX IF NOT EXISTS idx_alert_events_created_at
 ON alert_events (created_at DESC);
+
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS data_source TEXT NOT NULL DEFAULT 'rest';
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS vwap_cents DOUBLE PRECISION NULL;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS fillable_qty INTEGER NULL;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS liquidity_sufficient BOOLEAN NULL;

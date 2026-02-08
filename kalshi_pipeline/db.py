@@ -241,6 +241,39 @@ class PostgresStore:
             )
         return ticks
 
+    def get_latest_spot_tick(
+        self, *, source: str, symbol: str
+    ) -> dict[str, object] | None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ts, source, symbol, price_usd
+                FROM crypto_spot_ticks
+                WHERE source = %s AND symbol = %s
+                ORDER BY ts DESC
+                LIMIT 1
+                """,
+                (source, symbol),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        ts = row[0]
+        if isinstance(ts, datetime):
+            if ts.tzinfo is not None:
+                age_seconds = max(0.0, (datetime.now(ts.tzinfo) - ts).total_seconds())
+            else:
+                age_seconds = max(0.0, (datetime.utcnow() - ts).total_seconds())
+        else:
+            age_seconds = 0.0
+        return {
+            "ts": ts,
+            "source": row[1],
+            "symbol": row[2],
+            "price_usd": float(row[3]),
+            "age_seconds": age_seconds,
+        }
+
     def insert_signals(self, signals: list[SignalRecord]) -> int:
         inserted_count = 0
         with self.conn.cursor() as cur:
@@ -255,10 +288,14 @@ class PostgresStore:
                         market_probability,
                         edge_bps,
                         confidence,
+                        data_source,
+                        vwap_cents,
+                        fillable_qty,
+                        liquidity_sufficient,
                         details,
                         created_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
@@ -269,6 +306,10 @@ class PostgresStore:
                         signal.market_probability,
                         signal.edge_bps,
                         signal.confidence,
+                        signal.data_source,
+                        signal.vwap_cents,
+                        signal.fillable_qty,
+                        signal.liquidity_sufficient,
                         psycopg.types.json.Jsonb(signal.details if self.store_raw_json else signal.details),
                         signal.created_at,
                     ),
@@ -567,12 +608,128 @@ class PostgresStore:
         self.conn.commit()
         return inserted_count
 
+    def insert_bracket_arb_opportunities(self, rows: list[dict[str, object]]) -> list[int]:
+        inserted_ids: list[int] = []
+        with self.conn.cursor() as cur:
+            for row in rows:
+                cur.execute(
+                    """
+                    INSERT INTO bracket_arb_opportunities (
+                        detected_at,
+                        event_ticker,
+                        arb_type,
+                        n_brackets,
+                        cost_cents,
+                        payout_cents,
+                        profit_cents,
+                        profit_after_fees_cents,
+                        max_sets,
+                        total_profit_cents,
+                        legs,
+                        executed,
+                        execution_result
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        row.get("detected_at"),
+                        row.get("event_ticker"),
+                        row.get("arb_type"),
+                        int(row.get("n_brackets") or 0),
+                        int(row.get("cost_cents") or 0),
+                        int(row.get("payout_cents") or 0),
+                        int(row.get("profit_cents") or 0),
+                        int(row.get("profit_after_fees_cents") or 0),
+                        int(row.get("max_sets") or 0),
+                        int(row.get("total_profit_cents") or 0),
+                        psycopg.types.json.Jsonb(row.get("legs") or []),
+                        bool(row.get("executed", False)),
+                        psycopg.types.json.Jsonb(row.get("execution_result") or {}),
+                    ),
+                )
+                inserted_row = cur.fetchone()
+                if inserted_row is not None:
+                    inserted_ids.append(int(inserted_row[0]))
+        self.conn.commit()
+        return inserted_ids
+
+    def get_recent_bracket_arb_opportunities(
+        self, *, days: int = 7, limit: int = 50
+    ) -> list[dict[str, object]]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    detected_at,
+                    event_ticker,
+                    arb_type,
+                    n_brackets,
+                    cost_cents,
+                    payout_cents,
+                    profit_cents,
+                    profit_after_fees_cents,
+                    max_sets,
+                    total_profit_cents,
+                    legs,
+                    executed,
+                    execution_result
+                FROM bracket_arb_opportunities
+                WHERE detected_at >= NOW() - (%s || ' days')::interval
+                ORDER BY detected_at DESC
+                LIMIT %s
+                """,
+                (max(1, days), max(1, limit)),
+            )
+            rows = cur.fetchall()
+        output: list[dict[str, object]] = []
+        for row in rows:
+            output.append(
+                {
+                    "id": int(row[0]),
+                    "detected_at": row[1],
+                    "event_ticker": row[2],
+                    "arb_type": row[3],
+                    "n_brackets": int(row[4] or 0),
+                    "cost_cents": int(row[5] or 0),
+                    "payout_cents": int(row[6] or 0),
+                    "profit_cents": int(row[7] or 0),
+                    "profit_after_fees_cents": int(row[8] or 0),
+                    "max_sets": int(row[9] or 0),
+                    "total_profit_cents": int(row[10] or 0),
+                    "legs": row[11] if isinstance(row[11], list) else [],
+                    "executed": bool(row[12]),
+                    "execution_result": row[13] if isinstance(row[13], dict) else {},
+                }
+            )
+        return output
+
+    def mark_bracket_arb_executed(
+        self, *, opportunity_id: int, execution_result: dict[str, object]
+    ) -> bool:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE bracket_arb_opportunities
+                SET executed = TRUE,
+                    execution_result = %s
+                WHERE id = %s
+                RETURNING id
+                """,
+                (psycopg.types.json.Jsonb(execution_result), opportunity_id),
+            )
+            updated = cur.fetchone() is not None
+        self.conn.commit()
+        return updated
+
     def get_recent_signals(
         self, *, limit: int = 5, signal_type: str | None = None
     ) -> list[dict[str, object]]:
         query = """
             SELECT id, created_at, signal_type, market_ticker, direction, model_probability,
-                   market_probability, edge_bps, confidence, details
+                   market_probability, edge_bps, confidence, data_source,
+                   vwap_cents, fillable_qty, liquidity_sufficient, details
             FROM signals
         """
         params: list[object] = []
@@ -597,7 +754,11 @@ class PostgresStore:
                     "market_probability": row[6],
                     "edge_bps": row[7],
                     "confidence": row[8],
-                    "details": row[9] if isinstance(row[9], dict) else {},
+                    "data_source": row[9],
+                    "vwap_cents": row[10],
+                    "fillable_qty": row[11],
+                    "liquidity_sufficient": row[12],
+                    "details": row[13] if isinstance(row[13], dict) else {},
                 }
             )
         return output
@@ -714,6 +875,59 @@ class PostgresStore:
             "avg_fill_minutes": avg_fill_minutes,
         }
 
+    def estimate_fill_probability(
+        self,
+        *,
+        ticker_prefix: str,
+        lookback_days: int = 14,
+        min_price_cents: int | None = None,
+        max_price_cents: int | None = None,
+        min_samples: int = 20,
+    ) -> float | None:
+        cleaned_prefix = ticker_prefix.strip().upper()
+        if not cleaned_prefix:
+            return None
+
+        where_sql = [
+            "provider = 'kalshi_demo'",
+            "status <> 'simulated'",
+            "signal_type <> 'arbitrage'",
+            "market_ticker LIKE %s",
+            "created_at >= NOW() - (%s || ' days')::interval",
+        ]
+        params: list[object] = [f"{cleaned_prefix}%", max(1, int(lookback_days))]
+        if min_price_cents is not None:
+            where_sql.append("limit_price_cents >= %s")
+            params.append(int(min_price_cents))
+        if max_price_cents is not None:
+            where_sql.append("limit_price_cents <= %s")
+            params.append(int(max_price_cents))
+
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE status IN ('filled', 'partially_filled')
+                    )::INT AS filled_like_orders,
+                    COUNT(*) FILTER (
+                        WHERE status IN ('filled', 'partially_filled', 'canceled', 'failed')
+                    )::INT AS settled_orders
+                FROM paper_trade_orders
+                WHERE {" AND ".join(where_sql)}
+                """,
+                tuple(params),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+        filled_like_orders = int(row[0] or 0)
+        settled_orders = int(row[1] or 0)
+        if settled_orders < max(1, int(min_samples)):
+            return None
+        return filled_like_orders / float(settled_orders)
+
     def get_recent_alert_events(self, *, limit: int = 10) -> list[dict[str, object]]:
         with self.conn.cursor() as cur:
             cur.execute(
@@ -825,6 +1039,29 @@ class PostgresStore:
                 "details": row[4] if isinstance(row[4], dict) else {},
             }
         return output
+
+    def get_recent_reprice_timestamps(
+        self,
+        *,
+        market_ticker: str,
+        since_ts: datetime,
+        limit: int = 50,
+    ) -> list[datetime]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT event_ts
+                FROM paper_trade_order_events
+                WHERE market_ticker = %s
+                  AND status = 'reprice_submitted'
+                  AND event_ts >= %s
+                ORDER BY event_ts DESC
+                LIMIT %s
+                """,
+                (market_ticker, since_ts, max(1, int(limit))),
+            )
+            rows = cur.fetchall()
+        return [row[0] for row in rows if isinstance(row[0], datetime)]
 
     def update_paper_trade_order_status(
         self,
@@ -1083,3 +1320,70 @@ class PostgresStore:
             }
             for row in rows
         ]
+
+    def get_weather_backtest_rows(self, *, days: int = 30) -> list[dict[str, object]]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH latest_probs AS (
+                    SELECT DISTINCT ON (w.target_date, w.ticker)
+                        w.target_date,
+                        w.ticker,
+                        w.bracket_low,
+                        w.bracket_high,
+                        w.model_prob,
+                        w.market_prob,
+                        w.edge,
+                        w.ensemble_count,
+                        w.computed_at,
+                        r.result,
+                        r.actual_value,
+                        r.resolved_at
+                    FROM weather_bracket_probs w
+                    JOIN market_resolutions r ON r.ticker = w.ticker
+                    WHERE r.resolved_at IS NOT NULL
+                      AND w.computed_at <= r.resolved_at
+                      AND w.computed_at >= NOW() - (%s || ' days')::interval
+                      AND lower(r.result) IN ('yes', 'no')
+                    ORDER BY w.target_date, w.ticker, w.computed_at DESC
+                )
+                SELECT
+                    target_date,
+                    ticker,
+                    bracket_low,
+                    bracket_high,
+                    model_prob,
+                    market_prob,
+                    edge,
+                    ensemble_count,
+                    computed_at,
+                    resolved_at,
+                    result,
+                    CASE WHEN lower(result) = 'yes' THEN 1 ELSE 0 END AS actual_outcome,
+                    actual_value
+                FROM latest_probs
+                ORDER BY target_date DESC, ticker ASC
+                """,
+                (max(1, days),),
+            )
+            rows = cur.fetchall()
+        output: list[dict[str, object]] = []
+        for row in rows:
+            output.append(
+                {
+                    "target_date": row[0],
+                    "ticker": row[1],
+                    "bracket_low": row[2],
+                    "bracket_high": row[3],
+                    "model_prob": float(row[4]) if row[4] is not None else None,
+                    "market_prob": float(row[5]) if row[5] is not None else None,
+                    "edge": float(row[6]) if row[6] is not None else None,
+                    "ensemble_count": int(row[7] or 0),
+                    "computed_at": row[8],
+                    "resolved_at": row[9],
+                    "result": row[10],
+                    "actual_outcome": int(row[11] or 0),
+                    "actual_value": float(row[12]) if row[12] is not None else None,
+                }
+            )
+        return output

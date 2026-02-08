@@ -30,6 +30,7 @@ def compute_order_size(
     settings: Settings,
     current_exposure_dollars: float,
     bankroll_dollars: float | None,
+    fill_probability: float | None = None,
 ) -> int:
     if signal.model_probability is None:
         return 0
@@ -47,6 +48,15 @@ def compute_order_size(
         market_price_cents=market_price_cents,
         side=side,
     )
+    if kelly <= 0:
+        return 0
+
+    # Scale Kelly by empirical fill probability so thin books are sized down.
+    fill_prob = settings.paper_trade_default_fill_probability
+    if fill_probability is not None:
+        fill_prob = fill_probability
+    fill_prob = max(0.0, min(1.0, float(fill_prob)))
+    kelly *= fill_prob
     if kelly <= 0:
         return 0
 

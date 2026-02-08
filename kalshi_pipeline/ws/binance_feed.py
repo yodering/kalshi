@@ -28,6 +28,7 @@ class BinanceFeed:
             reconnect_max_delay=60.0,
         )
         self._ticks: deque[TradeTick] = deque(maxlen=5000)
+        self._last_update_time: datetime | None = None
 
     async def _on_message(self, msg: dict[str, Any]) -> None:
         if str(msg.get("e", "")).lower() != "trade":
@@ -40,6 +41,21 @@ class BinanceFeed:
             return
         ts = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
         self._ticks.append(TradeTick(ts=ts, price=price, quantity=quantity))
+        self._last_update_time = ts
+
+    @property
+    def is_connected(self) -> bool:
+        return self.manager.is_connected
+
+    @property
+    def last_update_time(self) -> datetime | None:
+        return self._last_update_time
+
+    @property
+    def age_seconds(self) -> float:
+        if self._last_update_time is None:
+            return float("inf")
+        return max(0.0, (datetime.now(timezone.utc) - self._last_update_time).total_seconds())
 
     def get_latest_price(self) -> float | None:
         if not self._ticks:
@@ -65,6 +81,16 @@ class BinanceFeed:
         if n <= 0:
             return []
         return [tick.price for tick in list(self._ticks)[-n:]]
+
+    def get_price_history_window(self, window_seconds: int) -> list[float]:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, window_seconds))
+        output: list[float] = []
+        for tick in reversed(self._ticks):
+            if tick.ts < cutoff:
+                break
+            output.append(tick.price)
+        output.reverse()
+        return output
 
     async def run(self) -> None:
         await self.manager.run()

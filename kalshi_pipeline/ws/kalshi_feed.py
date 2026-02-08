@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import logging
+import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -37,6 +38,7 @@ class KalshiFeed:
         self.orderbooks: dict[str, dict[str, Any]] = defaultdict(
             lambda: {"yes": {}, "no": {}, "seq": None, "best_yes_bid": None, "best_yes_ask": None}
         )
+        self._last_orderbook_update: dict[str, float] = {}
         self._lifecycle_callbacks: list[callable] = []
 
     def _auth_headers(self) -> dict[str, str]:
@@ -57,7 +59,34 @@ class KalshiFeed:
         self._lifecycle_callbacks.append(callback)
 
     def get_orderbook(self, ticker: str) -> dict[str, Any]:
-        return self.orderbooks[ticker]
+        state = self.orderbooks[ticker]
+        yes_levels = sorted(state.get("yes", {}).items(), key=lambda item: item[0], reverse=True)
+        no_levels = sorted(state.get("no", {}).items(), key=lambda item: item[0], reverse=True)
+        return {
+            "yes": [(int(price), int(qty)) for price, qty in yes_levels],
+            "no": [(int(price), int(qty)) for price, qty in no_levels],
+            "source": "ws",
+            "seq": state.get("seq"),
+            "best_yes_bid": state.get("best_yes_bid"),
+            "best_yes_ask": state.get("best_yes_ask"),
+        }
+
+    def has_orderbook(self, ticker: str) -> bool:
+        state = self.orderbooks.get(ticker)
+        if not state:
+            return False
+        return bool(state.get("yes") or state.get("no"))
+
+    @property
+    def is_connected(self) -> bool:
+        return self.manager.is_connected
+
+    def get_orderbook_age_seconds(self, ticker: str) -> float | None:
+        updated_at = self._last_orderbook_update.get(ticker)
+        if updated_at is None:
+            return None
+
+        return max(0.0, time.time() - updated_at)
 
     def get_best_bid_ask(self, ticker: str) -> tuple[int | None, int | None]:
         state = self.orderbooks.get(ticker)
@@ -120,6 +149,8 @@ class KalshiFeed:
         state["yes"] = yes_levels
         state["no"] = no_levels
         state["seq"] = msg.get("seq")
+
+        self._last_orderbook_update[ticker] = time.time()
         self._refresh_best_prices(ticker)
 
     def _handle_orderbook_delta(self, msg: dict[str, Any]) -> None:
@@ -162,6 +193,8 @@ class KalshiFeed:
                     else:
                         side_book[price] = quantity
         state["seq"] = msg.get("seq")
+
+        self._last_orderbook_update[ticker] = time.time()
         self._refresh_best_prices(ticker)
 
     def _handle_ticker(self, msg: dict[str, Any]) -> None:

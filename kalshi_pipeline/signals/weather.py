@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import re
+from typing import Any
 
 from ..config import Settings
 from ..models import (
@@ -11,6 +12,7 @@ from ..models import (
     WeatherBracketProbability,
     WeatherEnsembleSample,
 )
+from ..orderbook_utils import effective_no_ask_vwap, effective_yes_ask_vwap
 
 
 def _normalize_probability(price: float | None) -> float | None:
@@ -149,6 +151,7 @@ def build_weather_signals(
     ensemble_samples: list[WeatherEnsembleSample],
     *,
     now_utc: datetime,
+    orderbooks_by_ticker: dict[str, dict[str, Any]] | None = None,
 ) -> list[SignalRecord]:
     probability_rows = build_weather_probabilities(
         markets=markets,
@@ -161,32 +164,108 @@ def build_weather_signals(
 
     sample_count = len(ensemble_samples)
     sample_strength = min(1.0, sample_count / 60.0)
+    target_qty = max(1, settings.paper_trade_contract_count)
     signals: list[SignalRecord] = []
     for row in probability_rows:
         if row.market_prob is None or row.edge is None:
             continue
-        edge_bps = round(row.edge * 10000, 2)
-        direction = _direction(edge_bps, settings.signal_min_edge_bps)
+
+        orderbook = None
+        if orderbooks_by_ticker is not None:
+            maybe_book = orderbooks_by_ticker.get(row.ticker)
+            if isinstance(maybe_book, dict):
+                orderbook = maybe_book
+        yes_vwap = (
+            effective_yes_ask_vwap(orderbook, target_qty)
+            if isinstance(orderbook, dict)
+            else None
+        )
+        no_vwap = (
+            effective_no_ask_vwap(orderbook, target_qty)
+            if isinstance(orderbook, dict)
+            else None
+        )
+        yes_market_prob = (
+            _normalize_probability(yes_vwap[0] / 100.0) if yes_vwap is not None else row.market_prob
+        )
+        no_implied_yes_prob = (
+            _normalize_probability(1.0 - (no_vwap[0] / 100.0))
+            if no_vwap is not None
+            else row.market_prob
+        )
+
+        yes_edge_bps = (
+            (row.model_prob - yes_market_prob) * 10000
+            if yes_market_prob is not None
+            else None
+        )
+        no_edge_bps = (
+            (row.model_prob - no_implied_yes_prob) * 10000
+            if no_implied_yes_prob is not None
+            else None
+        )
+        edge_candidates = [edge for edge in (yes_edge_bps, no_edge_bps) if edge is not None]
+        if not edge_candidates:
+            continue
+
+        selected_edge = max(edge_candidates, key=lambda item: abs(item))
+        direction = _direction(selected_edge, settings.signal_min_edge_bps)
         if direction == "flat" and not settings.signal_store_all:
             continue
+
+        if direction == "buy_yes":
+            selected_market_prob = yes_market_prob
+            selected_vwap = yes_vwap
+            selected_fillable = yes_vwap[1] if yes_vwap is not None else None
+        elif direction == "buy_no":
+            selected_market_prob = no_implied_yes_prob
+            selected_vwap = no_vwap
+            selected_fillable = no_vwap[1] if no_vwap is not None else None
+        else:
+            selected_market_prob = yes_market_prob if yes_market_prob is not None else no_implied_yes_prob
+            selected_vwap = yes_vwap if yes_vwap is not None else no_vwap
+            selected_fillable = selected_vwap[1] if selected_vwap is not None else None
+
+        if selected_market_prob is None:
+            continue
+
+        edge_bps = round((row.model_prob - selected_market_prob) * 10000, 2)
         edge_strength = min(
             1.0, abs(edge_bps) / max(float(settings.signal_min_edge_bps) * 3.0, 1.0)
         )
         confidence = round(max(0.0, min(1.0, sample_strength * edge_strength)), 4)
+        orderbook_source = (
+            str(orderbook.get("source", "rest")) if isinstance(orderbook, dict) else "rest"
+        )
+        data_source = "ws" if orderbook_source == "ws" else "rest"
         signals.append(
             SignalRecord(
                 signal_type="weather",
                 market_ticker=row.ticker,
                 direction=direction,
                 model_probability=row.model_prob,
-                market_probability=row.market_prob,
+                market_probability=selected_market_prob,
                 edge_bps=edge_bps,
                 confidence=confidence,
+                data_source=data_source,
+                vwap_cents=(round(selected_vwap[0], 4) if selected_vwap is not None else None),
+                fillable_qty=selected_fillable,
+                liquidity_sufficient=(
+                    bool(selected_fillable is not None and selected_fillable >= target_qty)
+                    if selected_fillable is not None
+                    else None
+                ),
                 details={
                     "lower_bound": row.bracket_low,
                     "upper_bound": row.bracket_high,
                     "sample_count": sample_count,
                     "target_date": str(row.target_date),
+                    "target_qty": target_qty,
+                    "yes_vwap": round(yes_vwap[0], 4) if yes_vwap is not None else None,
+                    "yes_fillable": yes_vwap[1] if yes_vwap is not None else None,
+                    "no_vwap": round(no_vwap[0], 4) if no_vwap is not None else None,
+                    "no_fillable": no_vwap[1] if no_vwap is not None else None,
+                    "orderbook_source": orderbook_source,
                 },
                 created_at=now_utc,
             )

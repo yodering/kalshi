@@ -26,6 +26,7 @@ class CoinbaseFeed:
             reconnect_max_delay=60.0,
         )
         self._ticks: deque[CoinbaseTick] = deque(maxlen=5000)
+        self._last_update_time: datetime | None = None
 
     async def _on_message(self, msg: dict[str, Any]) -> None:
         msg_type = str(msg.get("type", "")).lower()
@@ -53,6 +54,21 @@ class CoinbaseFeed:
         self._ticks.append(
             CoinbaseTick(ts=ts, price=price, best_bid=best_bid, best_ask=best_ask)
         )
+        self._last_update_time = ts
+
+    @property
+    def is_connected(self) -> bool:
+        return self.manager.is_connected
+
+    @property
+    def last_update_time(self) -> datetime | None:
+        return self._last_update_time
+
+    @property
+    def age_seconds(self) -> float:
+        if self._last_update_time is None:
+            return float("inf")
+        return max(0.0, (datetime.now(timezone.utc) - self._last_update_time).total_seconds())
 
     async def run(self) -> None:
         self.manager._subscriptions.append(  # noqa: SLF001

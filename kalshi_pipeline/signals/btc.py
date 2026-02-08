@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from ..config import Settings
 from ..models import CryptoSpotTick, Market, MarketSnapshot, SignalRecord
+from ..orderbook_utils import effective_no_ask_vwap, effective_yes_ask_vwap
+
+if TYPE_CHECKING:
+    from ..data.price_provider import PriceProvider
 
 
 SOURCE_WEIGHTS: dict[str, float] = {
@@ -116,14 +121,29 @@ def build_btc_signals(
     current_ticks: list[CryptoSpotTick],
     *,
     now_utc: datetime,
+    price_provider: "PriceProvider | None" = None,
+    orderbooks_by_ticker: dict[str, dict[str, object]] | None = None,
 ) -> list[SignalRecord]:
-    if not current_ticks and not recent_ticks:
-        return []
+    latest_source_prices: dict[str, float] = {}
+    latest_ts: datetime | None = None
+    ws_price_sources: dict[str, str] = {}
 
-    active_ticks = current_ticks if current_ticks else recent_ticks
-    latest_ts, latest_source_prices = _latest_source_prices(active_ticks)
-    if latest_ts is None or not latest_source_prices:
-        return []
+    if price_provider is not None:
+        live_prices = price_provider.get_btc_prices()
+        for source_name, snapshot in live_prices.items():
+            latest_source_prices[source_name] = float(snapshot.price)
+            ws_price_sources[source_name] = snapshot.source
+            if latest_ts is None or snapshot.timestamp > latest_ts:
+                latest_ts = snapshot.timestamp
+
+    if not latest_source_prices:
+        if not current_ticks and not recent_ticks:
+            return []
+        active_ticks = current_ticks if current_ticks else recent_ticks
+        latest_ts, latest_source_prices = _latest_source_prices(active_ticks)
+        if latest_ts is None or not latest_source_prices:
+            return []
+        ws_price_sources = {source: "rest" for source in latest_source_prices}
 
     latest_fair_value, latest_confidence, latest_used_sources, agreement = _weighted_fair_value(
         latest_source_prices
@@ -153,18 +173,103 @@ def build_btc_signals(
     )
 
     signals: list[SignalRecord] = []
+    target_qty = max(1, settings.paper_trade_contract_count)
     for market in markets:
         if not _is_btc_market(market):
             continue
         snapshot = snapshots_by_ticker.get(market.ticker)
-        market_prob = _normalize_probability(snapshot.yes_price if snapshot else None)
-        if market_prob is None:
+        if snapshot is None and price_provider is not None:
+            snapshot = price_provider.get_market_snapshot(market.ticker)
+            if snapshot is not None:
+                snapshots_by_ticker[market.ticker] = snapshot
+
+        orderbook = None
+        if price_provider is not None:
+            orderbook = price_provider.get_kalshi_orderbook(market.ticker)
+        if orderbook is None and orderbooks_by_ticker is not None:
+            maybe_book = orderbooks_by_ticker.get(market.ticker)
+            if isinstance(maybe_book, dict):
+                orderbook = maybe_book
+        if orderbook is None and snapshot is not None and isinstance(snapshot.raw_json, dict):
+            maybe_book = snapshot.raw_json.get("orderbook")
+            if isinstance(maybe_book, dict):
+                orderbook = maybe_book
+
+        market_prob_default = _normalize_probability(snapshot.yes_price if snapshot else None)
+        yes_vwap = (
+            effective_yes_ask_vwap(orderbook, target_qty)
+            if isinstance(orderbook, dict)
+            else None
+        )
+        no_vwap = (
+            effective_no_ask_vwap(orderbook, target_qty)
+            if isinstance(orderbook, dict)
+            else None
+        )
+
+        yes_market_prob = (
+            _normalize_probability(yes_vwap[0] / 100.0) if yes_vwap is not None else market_prob_default
+        )
+        no_implied_yes_prob = (
+            _normalize_probability(1.0 - (no_vwap[0] / 100.0))
+            if no_vwap is not None
+            else market_prob_default
+        )
+
+        yes_edge = None
+        if yes_market_prob is not None:
+            yes_edge = (fair_yes_prob - yes_market_prob) * 10000
+
+        no_edge = None
+        if no_implied_yes_prob is not None:
+            no_edge = (fair_yes_prob - no_implied_yes_prob) * 10000
+
+        edge_candidates = [edge for edge in (yes_edge, no_edge) if edge is not None]
+        if not edge_candidates:
             continue
-        edge_bps = round((fair_yes_prob - market_prob) * 10000, 2)
-        direction = _direction(edge_bps, settings.signal_min_edge_bps)
+
+        # Choose the actionable side with the strongest absolute edge after liquidity adjustment.
+        selected_edge = max(edge_candidates, key=lambda item: abs(item))
+        direction = _direction(selected_edge, settings.signal_min_edge_bps)
         if direction == "flat" and not settings.signal_store_all:
             continue
+
+        if direction == "buy_yes":
+            market_prob = yes_market_prob
+            selected_vwap = yes_vwap
+            selected_fillable = yes_vwap[1] if yes_vwap is not None else None
+        elif direction == "buy_no":
+            market_prob = no_implied_yes_prob
+            selected_vwap = no_vwap
+            selected_fillable = no_vwap[1] if no_vwap is not None else None
+        else:
+            market_prob = yes_market_prob if yes_market_prob is not None else no_implied_yes_prob
+            selected_vwap = yes_vwap if yes_vwap is not None else no_vwap
+            selected_fillable = selected_vwap[1] if selected_vwap is not None else None
+
+        if market_prob is None:
+            continue
+
+        edge_bps = round((fair_yes_prob - market_prob) * 10000, 2)
         confidence = max(0.0, min(1.0, (latest_confidence + anchor_confidence) / 2.0))
+
+        price_source_values = [
+            ws_price_sources.get(source, "rest")
+            for source in latest_used_sources
+            if source in ws_price_sources
+        ]
+        orderbook_source = (
+            str(orderbook.get("source", "rest")) if isinstance(orderbook, dict) else "rest"
+        )
+        if price_source_values and all(source == "ws" for source in price_source_values) and orderbook_source == "ws":
+            data_source = "ws"
+        elif "ws" in price_source_values or orderbook_source == "ws":
+            data_source = "mixed"
+        elif "rest_fallback" in price_source_values:
+            data_source = "rest_fallback"
+        else:
+            data_source = "rest"
+
         signals.append(
             SignalRecord(
                 signal_type="btc",
@@ -174,10 +279,23 @@ def build_btc_signals(
                 market_probability=round(market_prob, 6),
                 edge_bps=edge_bps,
                 confidence=round(confidence, 4),
+                data_source=data_source,
+                vwap_cents=(round(selected_vwap[0], 4) if selected_vwap is not None else None),
+                fillable_qty=selected_fillable,
+                liquidity_sufficient=(
+                    bool(selected_fillable is not None and selected_fillable >= target_qty)
+                    if selected_fillable is not None
+                    else None
+                ),
                 details={
                     "latest_fair_value": round(latest_fair_value, 4),
                     "anchor_fair_value": round(anchor_fair_value, 4),
                     "latest_tick_ts": latest_ts.isoformat(),
+                    "signal_latency_ms": (
+                        round(max(0.0, (now_utc - latest_ts).total_seconds() * 1000.0), 2)
+                        if latest_ts is not None
+                        else None
+                    ),
                     "anchor_tick_ts": anchor_ts.isoformat() if anchor_ts else None,
                     "momentum_bps": round(momentum_bps, 2),
                     "source_prices_latest": {
@@ -192,6 +310,12 @@ def build_btc_signals(
                         sum(SOURCE_WEIGHTS.get(source, 0.0) for source in latest_used_sources), 4
                     ),
                     "agreement_factor": round(agreement, 4),
+                    "target_qty": target_qty,
+                    "yes_vwap": round(yes_vwap[0], 4) if yes_vwap is not None else None,
+                    "yes_fillable": yes_vwap[1] if yes_vwap is not None else None,
+                    "no_vwap": round(no_vwap[0], 4) if no_vwap is not None else None,
+                    "no_fillable": no_vwap[1] if no_vwap is not None else None,
+                    "orderbook_source": orderbook_source,
                 },
                 created_at=now_utc,
             )

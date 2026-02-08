@@ -53,6 +53,10 @@ class SignalRecord:
     market_probability: float | None
     edge_bps: float | None
     confidence: float | None
+    data_source: str
+    vwap_cents: float | None
+    fillable_qty: int | None
+    liquidity_sufficient: bool | None
     details: dict[str, Any]
     created_at: datetime
 

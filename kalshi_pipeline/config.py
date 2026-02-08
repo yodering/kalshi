@@ -398,6 +398,9 @@ class Settings:
     btc_core_sources: list[str]
     btc_min_core_sources: int
     btc_momentum_lookback_minutes: int
+    btc_signal_interval_seconds: int
+    bracket_arb_enabled: bool
+    bracket_arb_min_profit_after_fees_cents: int
     trading_profile: str
     paper_trading_enabled: bool
     paper_trading_mode: str
@@ -416,7 +419,12 @@ class Settings:
     paper_trade_queue_max_depth: int
     paper_trade_queue_stale_minutes: int
     paper_trade_reprice_cooldown_minutes: int
+    paper_trade_reprice_max_per_window: int
+    paper_trade_reprice_window_seconds: int
+    paper_trade_reprice_cooldown_seconds: int
     paper_trade_sizing_mode: str
+    paper_trade_default_fill_probability: float
+    paper_trade_fill_prob_lookback_days: int
     kelly_fraction_scale: float
     paper_trade_max_position_dollars: float
     paper_trade_max_portfolio_exposure_dollars: float
@@ -427,6 +435,10 @@ class Settings:
     telegram_notify_execution_events: bool
     telegram_min_edge_bps: int
     edge_decay_alert_threshold_bps: int
+    weather_live_gate_min_resolved_days: int
+    weather_live_gate_min_brier_advantage: float
+    weather_live_gate_min_sim_profit_cents: int
+    weather_live_gate_max_calibration_error: float
     signal_min_edge_bps: int
     signal_store_all: bool
 
@@ -536,6 +548,24 @@ class Settings:
         if paper_trade_reprice_cooldown_minutes < 1:
             paper_trade_reprice_cooldown_minutes = 1
 
+        paper_trade_reprice_max_per_window = _as_int(
+            os.getenv("PAPER_TRADE_REPRICE_MAX_PER_WINDOW"), 3
+        )
+        if paper_trade_reprice_max_per_window < 1:
+            paper_trade_reprice_max_per_window = 1
+
+        paper_trade_reprice_window_seconds = _as_int(
+            os.getenv("PAPER_TRADE_REPRICE_WINDOW_SECONDS"), 900
+        )
+        if paper_trade_reprice_window_seconds < 60:
+            paper_trade_reprice_window_seconds = 60
+
+        paper_trade_reprice_cooldown_seconds = _as_int(
+            os.getenv("PAPER_TRADE_REPRICE_COOLDOWN_SECONDS"), 60
+        )
+        if paper_trade_reprice_cooldown_seconds < 1:
+            paper_trade_reprice_cooldown_seconds = 1
+
         paper_trade_min_confidence = _as_float(
             os.getenv("PAPER_TRADE_MIN_CONFIDENCE"),
             float(profile_defaults["paper_trade_min_confidence"]),
@@ -562,6 +592,20 @@ class Settings:
         )
         if max_portfolio_exposure_dollars < max_position_dollars:
             max_portfolio_exposure_dollars = max_position_dollars
+
+        paper_trade_default_fill_probability = _as_float(
+            os.getenv("PAPER_TRADE_DEFAULT_FILL_PROBABILITY"), 0.5
+        )
+        if paper_trade_default_fill_probability < 0.0:
+            paper_trade_default_fill_probability = 0.0
+        if paper_trade_default_fill_probability > 1.0:
+            paper_trade_default_fill_probability = 1.0
+
+        paper_trade_fill_prob_lookback_days = _as_int(
+            os.getenv("PAPER_TRADE_FILL_PROB_LOOKBACK_DAYS"), 14
+        )
+        if paper_trade_fill_prob_lookback_days < 1:
+            paper_trade_fill_prob_lookback_days = 1
 
         return cls(
             database_url=database_url,
@@ -626,6 +670,13 @@ class Settings:
             btc_momentum_lookback_minutes=_as_int(
                 os.getenv("BTC_MOMENTUM_LOOKBACK_MINUTES"), 5
             ),
+            btc_signal_interval_seconds=max(
+                1, _as_int(os.getenv("BTC_SIGNAL_INTERVAL_SECONDS"), 5)
+            ),
+            bracket_arb_enabled=_as_bool(os.getenv("BRACKET_ARB_ENABLED"), True),
+            bracket_arb_min_profit_after_fees_cents=max(
+                0, _as_int(os.getenv("BRACKET_ARB_MIN_PROFIT_AFTER_FEES_CENTS"), 1)
+            ),
             trading_profile=trading_profile,
             paper_trading_enabled=_as_bool(
                 os.getenv("PAPER_TRADING_ENABLED"),
@@ -664,9 +715,14 @@ class Settings:
             paper_trade_queue_max_depth=paper_trade_queue_max_depth,
             paper_trade_queue_stale_minutes=paper_trade_queue_stale_minutes,
             paper_trade_reprice_cooldown_minutes=paper_trade_reprice_cooldown_minutes,
+            paper_trade_reprice_max_per_window=paper_trade_reprice_max_per_window,
+            paper_trade_reprice_window_seconds=paper_trade_reprice_window_seconds,
+            paper_trade_reprice_cooldown_seconds=paper_trade_reprice_cooldown_seconds,
             paper_trade_sizing_mode=_as_paper_trade_sizing_mode(
                 os.getenv("PAPER_TRADE_SIZING_MODE")
             ),
+            paper_trade_default_fill_probability=paper_trade_default_fill_probability,
+            paper_trade_fill_prob_lookback_days=paper_trade_fill_prob_lookback_days,
             kelly_fraction_scale=kelly_fraction_scale,
             paper_trade_max_position_dollars=max_position_dollars,
             paper_trade_max_portfolio_exposure_dollars=max_portfolio_exposure_dollars,
@@ -685,6 +741,18 @@ class Settings:
             ),
             edge_decay_alert_threshold_bps=_as_int(
                 os.getenv("EDGE_DECAY_ALERT_THRESHOLD_BPS"), 75
+            ),
+            weather_live_gate_min_resolved_days=max(
+                1, _as_int(os.getenv("WEATHER_LIVE_GATE_MIN_RESOLVED_DAYS"), 30)
+            ),
+            weather_live_gate_min_brier_advantage=_as_float(
+                os.getenv("WEATHER_LIVE_GATE_MIN_BRIER_ADVANTAGE"), 0.005
+            ),
+            weather_live_gate_min_sim_profit_cents=_as_int(
+                os.getenv("WEATHER_LIVE_GATE_MIN_SIM_PROFIT_CENTS"), 0
+            ),
+            weather_live_gate_max_calibration_error=max(
+                0.0, _as_float(os.getenv("WEATHER_LIVE_GATE_MAX_CALIBRATION_ERROR"), 0.15)
             ),
             signal_min_edge_bps=_as_int(
                 os.getenv("SIGNAL_MIN_EDGE_BPS"),

@@ -3,20 +3,25 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .collectors.crypto import fetch_btc_spot_ticks
 from .collectors.resolutions import collect_market_resolutions
 from .collectors.weather import fetch_weather_ensemble_samples
+from .analysis.weather_backtest import check_weather_live_gates, generate_weather_calibration
 from .config import Settings
 from .db import PostgresStore
 from .kalshi_client import KalshiClient
-from .models import MarketSnapshot
+from .models import CryptoSpotTick, Market, MarketSnapshot
 from .notifications import TelegramNotifier
 from .paper_trading import PaperTradingEngine
+from .signals.bracket_arb import BracketArbOpportunity, scan_bracket_arbitrage
 from .signals.btc import build_btc_signals
 from .signals.edge_monitor import build_edge_decay_alerts
 from .signals.weather import build_weather_probabilities, build_weather_signals
+
+if TYPE_CHECKING:
+    from .data.price_provider import PriceProvider
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +31,8 @@ class DataPipeline:
         self.settings = settings
         self.client = client
         self.store = store
+        self.price_provider: PriceProvider | None = None
+        self._last_markets: list[Market] = []
         self.did_backfill = False
         self.paper_trader = PaperTradingEngine(settings, client, store)
         self.telegram_notifier = TelegramNotifier(settings)
@@ -38,6 +45,84 @@ class DataPipeline:
         self._operational_alert_last_sent_at: dict[str, datetime] = {}
         self._operational_alert_cooldown = timedelta(hours=6)
         self._operational_alert_max_per_cycle = 3
+
+    def set_price_provider(self, price_provider: "PriceProvider") -> None:
+        self.price_provider = price_provider
+
+    @staticmethod
+    def _is_btc_market(market: Market) -> bool:
+        ticker = market.ticker.upper()
+        if ticker.startswith("KXBTC15M"):
+            return True
+        return str(market.raw_json.get("series_ticker", "")).upper() == "KXBTC15M"
+
+    @staticmethod
+    def _is_weather_market(market: Market) -> bool:
+        ticker = market.ticker.upper()
+        if ticker.startswith("KXHIGHNY"):
+            return True
+        return str(market.raw_json.get("series_ticker", "")).upper() == "KXHIGHNY"
+
+    @staticmethod
+    def _event_key_for_market(market: Market) -> str:
+        raw = market.raw_json if isinstance(market.raw_json, dict) else {}
+        event = str(raw.get("event_ticker") or raw.get("event") or "").strip().upper()
+        if event:
+            return event
+        ticker = market.ticker.strip().upper()
+        if "-" in ticker:
+            return ticker.split("-", 1)[0]
+        return ticker
+
+    def _get_orderbook(self, ticker: str) -> dict[str, Any] | None:
+        if self.price_provider is not None:
+            try:
+                orderbook = self.price_provider.get_kalshi_orderbook(ticker)
+                if orderbook:
+                    return orderbook
+            except Exception:
+                logger.warning("orderbook_fetch_failed ticker=%s source=price_provider", ticker, exc_info=True)
+        try:
+            return self.client.get_orderbook(ticker)
+        except Exception:
+            logger.warning("orderbook_fetch_failed ticker=%s source=rest", ticker, exc_info=True)
+            return None
+
+    def _scan_bracket_arbitrage(
+        self,
+        *,
+        markets: list[Market],
+        orderbooks_by_ticker: dict[str, dict[str, Any]],
+        now_utc: datetime,
+    ) -> list[BracketArbOpportunity]:
+        if not self.settings.bracket_arb_enabled:
+            return []
+
+        grouped_events: dict[str, list[str]] = {}
+        for market in markets:
+            if not self._is_weather_market(market):
+                continue
+            event_key = self._event_key_for_market(market)
+            grouped_events.setdefault(event_key, []).append(market.ticker)
+
+        opportunities: list[BracketArbOpportunity] = []
+        for event_ticker, tickers in grouped_events.items():
+            if len(tickers) < 2:
+                continue
+            if any(ticker not in orderbooks_by_ticker for ticker in tickers):
+                continue
+            opportunity = scan_bracket_arbitrage(
+                event_ticker=event_ticker,
+                bracket_tickers=tickers,
+                orderbooks=orderbooks_by_ticker,
+                min_profit_after_fees_cents=self.settings.bracket_arb_min_profit_after_fees_cents,
+                now_utc=now_utc,
+            )
+            if opportunity is None:
+                continue
+            opportunities.append(opportunity)
+        opportunities.sort(key=lambda row: row.profit_after_fees_cents, reverse=True)
+        return opportunities
 
     def _filter_operational_alerts(self, now_utc: datetime, messages: list[str]) -> list[str]:
         if not messages:
@@ -133,6 +218,7 @@ class DataPipeline:
     def run_once(self) -> dict[str, int]:
         now = datetime.now(timezone.utc)
         markets = self.client.list_markets(self.settings.market_limit)
+        self._last_markets = list(markets)
         resolution_rows_upserted = 0
         prediction_accuracy_rows_materialized = 0
         if not markets:
@@ -240,8 +326,39 @@ class DataPipeline:
         generated_signals = 0
         inserted_signals = 0
         all_signals = []
+        detected_arb_opportunities: list[BracketArbOpportunity] = []
+        serialized_arb_rows: list[dict[str, Any]] = []
+        inserted_arb_opportunities = 0
         try:
             snapshots_by_ticker = {snapshot.ticker: snapshot for snapshot in current_snapshots}
+            orderbooks_by_ticker: dict[str, dict[str, Any]] = {}
+            for market in markets:
+                orderbook = self._get_orderbook(market.ticker)
+                if isinstance(orderbook, dict):
+                    orderbooks_by_ticker[market.ticker] = orderbook
+            detected_arb_opportunities = self._scan_bracket_arbitrage(
+                markets=markets,
+                orderbooks_by_ticker=orderbooks_by_ticker,
+                now_utc=now,
+            )
+            for opportunity in detected_arb_opportunities:
+                serialized_arb_rows.append(
+                    {
+                        "detected_at": opportunity.detected_at,
+                        "event_ticker": opportunity.event_ticker,
+                        "arb_type": opportunity.arb_type,
+                        "n_brackets": len(opportunity.legs),
+                        "cost_cents": opportunity.cost_cents,
+                        "payout_cents": opportunity.payout_cents,
+                        "profit_cents": opportunity.profit_cents,
+                        "profit_after_fees_cents": opportunity.profit_after_fees_cents,
+                        "max_sets": opportunity.max_sets,
+                        "total_profit_cents": opportunity.total_profit_cents,
+                        "legs": opportunity.legs,
+                        "executed": False,
+                        "execution_result": {},
+                    }
+                )
             if weather_samples:
                 weather_prob_rows = build_weather_probabilities(
                     markets,
@@ -260,6 +377,7 @@ class DataPipeline:
                         snapshots_by_ticker,
                         weather_samples,
                         now_utc=now,
+                        orderbooks_by_ticker=orderbooks_by_ticker,
                     )
                 )
             if self.settings.btc_enabled:
@@ -276,6 +394,8 @@ class DataPipeline:
                         recent_ticks,
                         crypto_ticks,
                         now_utc=now,
+                        price_provider=self.price_provider,
+                        orderbooks_by_ticker=orderbooks_by_ticker,
                     )
                 )
             generated_signals = len(all_signals)
@@ -319,10 +439,27 @@ class DataPipeline:
             "paper_orders_reprice_recorded": 0,
             "paper_orders_reprice_failed": 0,
             "paper_orders_queue_alerted": 0,
+            "arb_opportunities_detected": len(detected_arb_opportunities),
+            "arb_opportunities_inserted": 0,
+            "weather_gate_blocked": 0,
         }
         paper_orders = []
         repriced_orders = []
+        arb_execution_results: list[dict[str, Any]] = []
         try:
+            executable_signals = list(all_signals)
+            if self.runtime_mode in {"live_safe", "live_auto"}:
+                calibration_report = generate_weather_calibration(
+                    self.store,
+                    days=max(30, self.settings.weather_live_gate_min_resolved_days),
+                )
+                gates = check_weather_live_gates(calibration_report, self.settings)
+                if not all(gates.values()):
+                    executable_signals = [
+                        signal for signal in executable_signals if signal.signal_type != "weather"
+                    ]
+                    paper_stats["weather_gate_blocked"] = 1
+
             if self.paused or not self.runtime_auto_trading_enabled:
                 logger.info(
                     "paper_trading_skipped paused=%s runtime_auto_trading_enabled=%s",
@@ -330,8 +467,11 @@ class DataPipeline:
                     self.runtime_auto_trading_enabled,
                 )
             else:
-                paper_orders, paper_stats = self.paper_trader.execute(
-                    all_signals, snapshots_by_ticker, now
+                paper_orders, paper_stats, arb_execution_results = self.paper_trader.execute(
+                    executable_signals,
+                    snapshots_by_ticker,
+                    now,
+                    arb_opportunities=serialized_arb_rows,
                 )
 
             if self.settings.paper_trading_mode == "kalshi_demo":
@@ -347,6 +487,28 @@ class DataPipeline:
                     paper_stats[key] = paper_stats.get(key, 0) + value
         except Exception:
             logger.exception("paper_trading_failed")
+
+        if serialized_arb_rows:
+            result_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+            for result in arb_execution_results:
+                event_ticker = str(result.get("event_ticker") or "")
+                arb_type = str(result.get("arb_type") or "")
+                if not event_ticker or not arb_type:
+                    continue
+                result_by_key[(event_ticker, arb_type)] = result
+            for row in serialized_arb_rows:
+                key = (str(row.get("event_ticker") or ""), str(row.get("arb_type") or ""))
+                result = result_by_key.get(key)
+                if result is None:
+                    continue
+                row["executed"] = bool(result.get("executed"))
+                row["execution_result"] = result
+            try:
+                inserted_arb_ids = self.store.insert_bracket_arb_opportunities(serialized_arb_rows)
+                inserted_arb_opportunities = len(inserted_arb_ids)
+            except Exception:
+                logger.exception("arb_persist_failed")
+            paper_stats["arb_opportunities_inserted"] = inserted_arb_opportunities
 
         alert_events_inserted = 0
         try:
@@ -367,6 +529,18 @@ class DataPipeline:
                 edge_decay_alert_threshold_bps=self.settings.edge_decay_alert_threshold_bps,
                 active_market_tickers={market.ticker for market in markets},
             )
+            arb_messages: list[str] = []
+            for opportunity in detected_arb_opportunities[:3]:
+                arb_messages.append(
+                    (
+                        "🎯 Bracket arbitrage detected "
+                        f"{opportunity.event_ticker} {opportunity.arb_type} "
+                        f"profit_after_fees={opportunity.profit_after_fees_cents}c "
+                        f"max_sets={opportunity.max_sets}"
+                    )
+                )
+            if arb_messages:
+                decay_messages.extend(arb_messages)
             if decay_messages:
                 decay_messages = self._filter_operational_alerts(now, decay_messages)
             if decay_messages:
@@ -392,6 +566,8 @@ class DataPipeline:
             "alert_events_inserted": alert_events_inserted,
             "resolutions_upserted": resolution_rows_upserted,
             "prediction_accuracy_materialized": prediction_accuracy_rows_materialized,
+            "arb_opportunities_detected": len(detected_arb_opportunities),
+            "arb_opportunities_inserted": inserted_arb_opportunities,
         }
         stats.update(paper_stats)
         self.last_poll_at = now
@@ -426,3 +602,113 @@ class DataPipeline:
                         self.store.insert_alert_events(command_events)
                 except Exception:
                     logger.exception("telegram_command_poll_failed")
+
+    def run_realtime_btc_cycle(self) -> dict[str, int]:
+        now = datetime.now(timezone.utc)
+        markets = [market for market in self._last_markets if self._is_btc_market(market)]
+        if not markets:
+            discovered = self.client.list_markets(self.settings.market_limit)
+            self._last_markets = list(discovered)
+            markets = [market for market in discovered if self._is_btc_market(market)]
+
+        if not markets:
+            return {
+                "btc_markets_seen": 0,
+                "btc_snapshots_inserted": 0,
+                "btc_ticks_inserted": 0,
+                "btc_signals_generated": 0,
+                "btc_signals_inserted": 0,
+                "btc_realtime_orders": 0,
+                "btc_realtime_order_alert_events": 0,
+            }
+
+        ticker_to_id = self.store.upsert_markets(markets)
+        snapshots_by_ticker: dict[str, MarketSnapshot] = {}
+        current_snapshots: list[MarketSnapshot] = []
+        orderbooks_by_ticker: dict[str, dict[str, Any]] = {}
+        for market in markets:
+            snapshot = None
+            if self.price_provider is not None:
+                try:
+                    snapshot = self.price_provider.get_market_snapshot(market.ticker)
+                except Exception:
+                    logger.warning(
+                        "realtime_snapshot_failed ticker=%s source=price_provider",
+                        market.ticker,
+                        exc_info=True,
+                    )
+            if snapshot is None:
+                try:
+                    snapshot = self.client.get_current_snapshot(market)
+                except Exception:
+                    logger.warning(
+                        "realtime_snapshot_failed ticker=%s source=rest",
+                        market.ticker,
+                        exc_info=True,
+                    )
+                    continue
+            snapshots_by_ticker[market.ticker] = snapshot
+            current_snapshots.append(snapshot)
+            orderbook = self._get_orderbook(market.ticker)
+            if isinstance(orderbook, dict):
+                orderbooks_by_ticker[market.ticker] = orderbook
+
+        inserted_current = self.store.insert_snapshots(current_snapshots, ticker_to_id)
+
+        current_ticks: list[CryptoSpotTick] = []
+        if self.price_provider is not None:
+            live_prices = self.price_provider.get_btc_prices()
+            for source, snapshot in live_prices.items():
+                current_ticks.append(
+                    CryptoSpotTick(
+                        ts=snapshot.timestamp,
+                        source=source,
+                        symbol=self.settings.btc_symbol,
+                        price_usd=float(snapshot.price),
+                        raw_json={"data_source": snapshot.source, "mode": "realtime"},
+                    )
+                )
+        inserted_ticks = self.store.insert_crypto_spot_ticks(current_ticks) if current_ticks else 0
+
+        lookback_window = max(self.settings.btc_momentum_lookback_minutes + 2, 20)
+        recent_ticks = self.store.get_recent_crypto_spot_ticks(
+            symbol=self.settings.btc_symbol,
+            since_ts=now - timedelta(minutes=lookback_window),
+        )
+        btc_signals = build_btc_signals(
+            self.settings,
+            markets,
+            snapshots_by_ticker,
+            recent_ticks,
+            current_ticks,
+            now_utc=now,
+            price_provider=self.price_provider,
+            orderbooks_by_ticker=orderbooks_by_ticker,
+        )
+        inserted_signals = self.store.insert_signals(btc_signals) if btc_signals else 0
+
+        order_count = 0
+        alert_events_inserted = 0
+        if not self.paused and self.runtime_auto_trading_enabled and btc_signals:
+            orders, _paper_stats, _arb_results = self.paper_trader.execute(
+                btc_signals,
+                snapshots_by_ticker,
+                now,
+                arb_opportunities=[],
+            )
+            order_count = len(orders)
+            if orders:
+                # Realtime loop intentionally suppresses signal digests to avoid Telegram spam.
+                events = self.telegram_notifier.notify(now, [], orders)
+                if events:
+                    alert_events_inserted = self.store.insert_alert_events(events)
+
+        return {
+            "btc_markets_seen": len(markets),
+            "btc_snapshots_inserted": inserted_current,
+            "btc_ticks_inserted": inserted_ticks,
+            "btc_signals_generated": len(btc_signals),
+            "btc_signals_inserted": inserted_signals,
+            "btc_realtime_orders": order_count,
+            "btc_realtime_order_alert_events": alert_events_inserted,
+        }

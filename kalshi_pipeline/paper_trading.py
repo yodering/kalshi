@@ -61,6 +61,13 @@ def _best_book_prices(snapshot: MarketSnapshot) -> dict[str, int | None]:
     return {"yes_bid": yes_bid, "yes_ask": yes_ask, "no_bid": no_bid, "no_ask": no_ask}
 
 
+def _ticker_prefix(ticker: str) -> str:
+    cleaned = ticker.strip().upper()
+    if not cleaned:
+        return ""
+    return cleaned.split("-", 1)[0]
+
+
 def _maker_price_for_side(
     *,
     side: str,
@@ -103,21 +110,6 @@ def _maker_price_for_side(
     return clamped
 
 
-def _find_arbitrage(book: dict[str, int | None]) -> dict[str, int] | None:
-    yes_ask = book.get("yes_ask")
-    no_ask = book.get("no_ask")
-    if yes_ask is None or no_ask is None:
-        return None
-    total_cost = yes_ask + no_ask
-    if total_cost >= 100:
-        return None
-    return {
-        "yes_price": yes_ask,
-        "no_price": no_ask,
-        "profit_per_contract": 100 - total_cost,
-    }
-
-
 class PaperTradingEngine:
     def __init__(self, settings: Settings, client: KalshiClient, store: PostgresStore) -> None:
         self.settings = settings
@@ -134,6 +126,7 @@ class PaperTradingEngine:
         count: int,
         price_cents: int,
         now_utc: datetime,
+        fill_probability: float | None = None,
     ) -> PaperTradeOrder:
         request_payload: dict[str, Any] = {
             "ticker": market_ticker,
@@ -141,6 +134,8 @@ class PaperTradingEngine:
             "count": count,
             "price_cents": price_cents,
         }
+        if fill_probability is not None:
+            request_payload["fill_probability_estimate"] = round(float(fill_probability), 6)
         response_payload: dict[str, Any] = {}
         status = "simulated"
         reason: str | None = None
@@ -189,7 +184,9 @@ class PaperTradingEngine:
         signals: list[SignalRecord],
         snapshots_by_ticker: dict[str, MarketSnapshot],
         now_utc: datetime,
-    ) -> tuple[list[PaperTradeOrder], dict[str, int]]:
+        *,
+        arb_opportunities: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[PaperTradeOrder], dict[str, int], list[dict[str, Any]]]:
         stats = {
             "paper_orders_candidates": 0,
             "paper_orders_attempted": 0,
@@ -199,8 +196,9 @@ class PaperTradingEngine:
             "paper_orders_skipped": 0,
             "paper_orders_recorded": 0,
         }
+        arb_results: list[dict[str, Any]] = []
         if not self.settings.paper_trading_enabled:
-            return [], stats
+            return [], stats, arb_results
 
         candidates = []
         for signal in signals:
@@ -224,47 +222,69 @@ class PaperTradingEngine:
         )
 
         orders: list[PaperTradeOrder] = []
+        fill_probability_cache: dict[str, float] = {}
         cooldown_since = now_utc - timedelta(minutes=self.settings.paper_trade_cooldown_minutes)
         max_orders = self.settings.paper_trade_max_orders_per_cycle
 
         # Arbitrage gets first priority if enabled.
-        if self.settings.paper_trade_enable_arbitrage:
-            seen_tickers: set[str] = set()
-            for signal in candidates:
-                ticker = signal.market_ticker
-                if ticker is None or ticker in seen_tickers:
+        if self.settings.paper_trade_enable_arbitrage and arb_opportunities:
+            for opportunity in arb_opportunities:
+                legs = opportunity.get("legs")
+                if not isinstance(legs, list) or not legs:
                     continue
-                seen_tickers.add(ticker)
-                if stats["paper_orders_attempted"] + 2 > max_orders:
+                max_sets = as_int(opportunity.get("max_sets")) or 0
+                count = min(max_sets, self.settings.paper_trade_contract_count)
+                if count <= 0:
+                    continue
+                # Arbitrage legs should be treated atomically. If this is the first thing
+                # in the cycle, allow it even if it exceeds the generic per-cycle cap.
+                if stats["paper_orders_attempted"] > 0 and (
+                    stats["paper_orders_attempted"] + len(legs) > max_orders
+                ):
                     break
-                snapshot = snapshots_by_ticker.get(ticker)
-                if snapshot is None:
-                    continue
-                book = _best_book_prices(snapshot)
-                arb = _find_arbitrage(book)
-                if arb is None:
-                    continue
-                for side_key, side_name in (("yes_price", "yes"), ("no_price", "no")):
+
+                result = {
+                    "id": opportunity.get("id"),
+                    "event_ticker": opportunity.get("event_ticker"),
+                    "arb_type": opportunity.get("arb_type"),
+                    "submitted": 0,
+                    "simulated": 0,
+                    "failed": 0,
+                }
+                for leg in legs:
+                    if not isinstance(leg, dict):
+                        continue
+                    ticker = str(leg.get("ticker") or "").strip()
+                    side = str(leg.get("side") or "").strip().lower()
+                    price_cents = as_int(leg.get("price_cents"))
+                    if not ticker or side not in {"yes", "no"} or price_cents is None:
+                        continue
                     stats["paper_orders_attempted"] += 1
                     order = self._submit_order(
                         market_ticker=ticker,
-                        signal_type=signal.signal_type,
-                        direction="arbitrage",
-                        side=side_name,
-                        count=self.settings.paper_trade_contract_count,
-                        price_cents=int(arb[side_key]),
+                        signal_type="arbitrage",
+                        direction=f"arb_{opportunity.get('arb_type') or 'combo'}",
+                        side=side,
+                        count=count,
+                        price_cents=price_cents,
                         now_utc=now_utc,
+                        fill_probability=None,
                     )
                     orders.append(order)
                     if order.status == "submitted":
                         stats["paper_orders_submitted"] += 1
+                        result["submitted"] += 1
                         current_exposure_dollars += (
                             order.count * (order.limit_price_cents / 100.0)
                         )
                     elif order.status == "simulated":
                         stats["paper_orders_simulated"] += 1
+                        result["simulated"] += 1
                     else:
                         stats["paper_orders_failed"] += 1
+                        result["failed"] += 1
+                result["executed"] = bool(result["submitted"] or result["simulated"])
+                arb_results.append(result)
 
         for signal in candidates:
             if stats["paper_orders_attempted"] >= max_orders:
@@ -292,6 +312,12 @@ class PaperTradingEngine:
             if price_cents is None:
                 stats["paper_orders_skipped"] += 1
                 continue
+            fill_probability = self._estimate_fill_probability_for_signal(
+                signal=signal,
+                market_ticker=ticker,
+                market_price_cents=price_cents,
+                cache=fill_probability_cache,
+            )
             count = compute_order_size(
                 signal=signal,
                 side=side,
@@ -299,6 +325,7 @@ class PaperTradingEngine:
                 settings=self.settings,
                 current_exposure_dollars=current_exposure_dollars,
                 bankroll_dollars=self.settings.paper_trade_max_portfolio_exposure_dollars,
+                fill_probability=fill_probability,
             )
             if count <= 0:
                 stats["paper_orders_skipped"] += 1
@@ -313,6 +340,7 @@ class PaperTradingEngine:
                 count=count,
                 price_cents=price_cents,
                 now_utc=now_utc,
+                fill_probability=fill_probability,
             )
             orders.append(order)
             if order.status == "submitted":
@@ -325,7 +353,7 @@ class PaperTradingEngine:
 
         if orders:
             stats["paper_orders_recorded"] = self.store.insert_paper_trade_orders(orders)
-        return orders, stats
+        return orders, stats, arb_results
 
     def reconcile_open_orders(
         self,
@@ -476,16 +504,12 @@ class PaperTradingEngine:
             except Exception:
                 logger.warning("paper_trade_queue_positions_failed", exc_info=True)
 
-        reprice_since = now_utc - timedelta(
-            minutes=self.settings.paper_trade_reprice_cooldown_minutes
-        )
         stale_cutoff = now_utc - timedelta(minutes=self.settings.paper_trade_queue_stale_minutes)
         for order in still_submitted:
             order_id = int(order["id"])
             ticker = str(order.get("market_ticker") or "").strip()
             external_order_id = str(order.get("external_order_id") or "").strip()
             side = str(order.get("side") or "").lower()
-            direction = str(order.get("direction") or "")
             order_created_at = order.get("created_at")
             if not ticker or not external_order_id:
                 continue
@@ -517,8 +541,27 @@ class PaperTradingEngine:
                 continue
             if not isinstance(order_created_at, datetime) or order_created_at > stale_cutoff:
                 continue
-            if self.store.has_recent_paper_order(ticker, direction, reprice_since):
+            recent_reprices = self.store.get_recent_reprice_timestamps(
+                market_ticker=ticker,
+                since_ts=now_utc
+                - timedelta(seconds=self.settings.paper_trade_reprice_window_seconds),
+                limit=max(10, self.settings.paper_trade_reprice_max_per_window * 3),
+            )
+            if len(recent_reprices) >= self.settings.paper_trade_reprice_max_per_window:
+                logger.info(
+                    "paper_trade_reprice_blocked ticker=%s reason=max_reprices_per_window",
+                    ticker,
+                )
                 continue
+            if recent_reprices:
+                most_recent = max(recent_reprices)
+                since_last = (now_utc - most_recent).total_seconds()
+                if since_last < self.settings.paper_trade_reprice_cooldown_seconds:
+                    logger.info(
+                        "paper_trade_reprice_blocked ticker=%s reason=cooldown_seconds",
+                        ticker,
+                    )
+                    continue
             current_signal = signal_by_ticker.get(ticker)
             expected_direction = "buy_yes" if side == "yes" else "buy_no"
             if current_signal is None or current_signal.direction != expected_direction:
@@ -589,10 +632,30 @@ class PaperTradingEngine:
                 count=int(order.get("count") or 1),
                 price_cents=new_price,
                 now_utc=now_utc,
+                fill_probability=self._estimate_fill_probability_for_signal(
+                    signal=current_signal,
+                    market_ticker=ticker,
+                    market_price_cents=new_price,
+                    cache=None,
+                ),
             )
             repriced_orders.append(refreshed)
             if refreshed.status == "submitted":
                 stats["paper_orders_repriced"] += 1
+                self.store.insert_order_event(
+                    order_id=order_id,
+                    market_ticker=ticker,
+                    external_order_id=refreshed.external_order_id,
+                    status="reprice_submitted",
+                    queue_position=queue_position,
+                    event_ts=now_utc,
+                    details={
+                        "old_order_id": external_order_id,
+                        "old_price_cents": old_price,
+                        "new_price_cents": new_price,
+                    },
+                )
+                stats["paper_order_events_inserted"] += 1
             elif refreshed.status == "failed":
                 stats["paper_orders_reprice_failed"] += 1
 
@@ -601,3 +664,37 @@ class PaperTradingEngine:
                 repriced_orders
             )
         return repriced_orders, stats
+
+    def _estimate_fill_probability_for_signal(
+        self,
+        *,
+        signal: SignalRecord,
+        market_ticker: str,
+        market_price_cents: int,
+        cache: dict[str, float] | None,
+    ) -> float:
+        prefix = _ticker_prefix(market_ticker)
+        if not prefix:
+            return self.settings.paper_trade_default_fill_probability
+        if cache is not None and prefix in cache:
+            return cache[prefix]
+
+        estimated = self.store.estimate_fill_probability(
+            ticker_prefix=prefix,
+            lookback_days=self.settings.paper_trade_fill_prob_lookback_days,
+            min_price_cents=max(1, market_price_cents - 10),
+            max_price_cents=min(99, market_price_cents + 10),
+            min_samples=20,
+        )
+        if estimated is None:
+            estimated = self.settings.paper_trade_default_fill_probability
+        estimated = max(0.0, min(1.0, float(estimated)))
+        if cache is not None:
+            cache[prefix] = estimated
+        logger.info(
+            "paper_trade_fill_probability signal_type=%s ticker=%s estimated=%.4f",
+            signal.signal_type,
+            market_ticker,
+            estimated,
+        )
+        return estimated
