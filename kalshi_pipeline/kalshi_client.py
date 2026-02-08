@@ -80,7 +80,10 @@ class KalshiClient:
     def list_markets(self, limit: int) -> list[Market]:
         if self.settings.kalshi_stub_mode:
             return generate_markets(limit)
-        rows = self._discover_target_markets(limit=limit)
+        if self.settings.target_market_tickers:
+            rows = self._fetch_markets_by_ticker(self.settings.target_market_tickers[:limit])
+        else:
+            rows = self._discover_target_markets(limit=limit)
         markets: list[Market] = []
         for row in rows:
             ticker = row.get("ticker") or row.get("id")
@@ -151,16 +154,22 @@ class KalshiClient:
             )
         return snapshots
 
+    def _fetch_markets_by_ticker(self, tickers: list[str]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for ticker in tickers:
+            payload = self._request_json("GET", f"/trade-api/v2/markets/{ticker}")
+            row = payload.get("market", payload)
+            if not isinstance(row, dict):
+                continue
+            if not row.get("ticker"):
+                row["ticker"] = ticker
+            rows.append(row)
+        return rows
+
     def _discover_target_markets(self, limit: int) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"limit": min(1000, max(1, limit))}
         if self.settings.target_market_status:
             params["status"] = self.settings.target_market_status
-
-        if self.settings.target_market_tickers:
-            params["tickers"] = ",".join(self.settings.target_market_tickers)
-            payload = self._request_json("GET", "/trade-api/v2/markets", params=params)
-            rows = payload.get("markets") or payload.get("data") or []
-            return rows[:limit]
 
         matched: dict[str, dict[str, Any]] = {}
         pages_seen = 0
@@ -189,9 +198,9 @@ class KalshiClient:
         return []
 
     def _matches_targets(self, row: dict[str, Any]) -> bool:
-        ticker = str(row.get("ticker", ""))
-        event_ticker = str(row.get("event_ticker", ""))
-        series_ticker = str(row.get("series_ticker", ""))
+        ticker = str(row.get("ticker", "")).upper()
+        event_ticker = str(row.get("event_ticker", "")).upper()
+        series_ticker = str(row.get("series_ticker", "")).upper()
         if self.settings.target_event_tickers and event_ticker in self.settings.target_event_tickers:
             return True
         if self.settings.target_series_tickers and series_ticker in self.settings.target_series_tickers:

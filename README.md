@@ -68,7 +68,7 @@ python3 -m kalshi_pipeline.main discover-targets
 - `TARGET_MARKET_QUERY_GROUPS`: semicolon-separated keyword groups (default: NYC temperature + BTC 15m up/down)
 - `TARGET_MARKET_STATUS`: market status filter (default `open`)
 - `TARGET_MARKET_DISCOVERY_PAGES`: max pages scanned during target discovery (default `10`)
-- `TARGET_MARKET_TICKERS`: optional comma-separated exact market tickers
+- `TARGET_MARKET_TICKERS`: optional comma-separated exact market tickers (or full Kalshi market URLs)
 - `TARGET_EVENT_TICKERS`: optional comma-separated exact event tickers
 - `TARGET_SERIES_TICKERS`: optional comma-separated exact series tickers
 - `STORE_RAW_JSON`: whether to persist full raw API payloads (default `false`)
@@ -109,3 +109,4 @@ After any variable change, redeploy the worker service.
 - Live mode now signs each request (`timestamp + method + path`) using RSA-PSS/SHA256.
 - If no markets match your filters, logs will show:
   - `No markets matched current target filters. Check TARGET_* env settings.`
+- When `TARGET_MARKET_TICKERS` is set, the pipeline fetches those exact contracts directly.

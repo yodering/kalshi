@@ -29,6 +29,24 @@ def _as_list(value: str | None) -> list[str]:
     return items
 
 
+def _as_market_ids(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    items: list[str] = []
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        # Allow full Kalshi URLs and extract the last path segment as ticker.
+        if "/" in part:
+            parsed = urlsplit(part)
+            path = parsed.path.strip("/")
+            if path:
+                part = path.split("/")[-1]
+        items.append(part.upper())
+    return items
+
+
 def _as_groups(value: str | None) -> list[str]:
     if value is None:
         return []
@@ -166,9 +184,9 @@ class Settings:
             kalshi_api_key_id=os.getenv("KALSHI_API_KEY_ID", ""),
             kalshi_api_key_secret=os.getenv("KALSHI_API_KEY_SECRET", ""),
             kalshi_private_key_path=os.getenv("KALSHI_PRIVATE_KEY_PATH", ""),
-            target_market_tickers=_as_list(os.getenv("TARGET_MARKET_TICKERS")),
-            target_event_tickers=_as_list(os.getenv("TARGET_EVENT_TICKERS")),
-            target_series_tickers=_as_list(os.getenv("TARGET_SERIES_TICKERS")),
+            target_market_tickers=_as_market_ids(os.getenv("TARGET_MARKET_TICKERS")),
+            target_event_tickers=_as_market_ids(os.getenv("TARGET_EVENT_TICKERS")),
+            target_series_tickers=_as_market_ids(os.getenv("TARGET_SERIES_TICKERS")),
             target_market_query_groups=_as_groups(
                 os.getenv(
                     "TARGET_MARKET_QUERY_GROUPS",
