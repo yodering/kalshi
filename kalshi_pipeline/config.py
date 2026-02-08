@@ -64,6 +64,17 @@ def _as_groups(value: str | None) -> list[str]:
     return groups
 
 
+def _as_market_status(value: str | None, default: str = "open") -> str:
+    if value is None:
+        return default
+    cleaned = value.strip()
+    if not cleaned:
+        return default
+    if cleaned.lower() in {"any", "all", "none", "*"}:
+        return ""
+    return cleaned
+
+
 def _clean_env(value: str | None) -> str:
     if value is None:
         return ""
@@ -248,7 +259,7 @@ class Settings:
                     "highest temperature in nyc today;bitcoin price up down 15 minutes",
                 )
             ),
-            target_market_status=os.getenv("TARGET_MARKET_STATUS", "open").strip() or "open",
+            target_market_status=_as_market_status(os.getenv("TARGET_MARKET_STATUS"), "open"),
             target_market_discovery_pages=_as_int(os.getenv("TARGET_MARKET_DISCOVERY_PAGES"), 10),
             store_raw_json=_as_bool(os.getenv("STORE_RAW_JSON"), False),
             weather_enabled=_as_bool(os.getenv("WEATHER_ENABLED"), True),

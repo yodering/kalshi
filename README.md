@@ -72,7 +72,7 @@ python3 -m kalshi_pipeline.main discover-targets
 - `KALSHI_PRIVATE_KEY_PATH`: optional explicit path to key PEM file
 - `KALSHI_PRIVATE_KEY_PASSWORD`: optional private key password
 - `TARGET_MARKET_QUERY_GROUPS`: semicolon-separated keyword groups (default: highest NYC temp today + BTC up/down 15m)
-- `TARGET_MARKET_STATUS`: market status filter (default `open`)
+- `TARGET_MARKET_STATUS`: market status filter (default `open`, set `any` to disable status filter)
 - `TARGET_MARKET_DISCOVERY_PAGES`: max pages scanned during target discovery (default `10`)
 - `TARGET_MARKET_TICKERS`: optional comma-separated exact market tickers (or full Kalshi market URLs)
 - `TARGET_EVENT_TICKERS`: optional comma-separated exact event tickers

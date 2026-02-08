@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+import logging
 import os
 from pathlib import Path
 import re
@@ -24,6 +25,8 @@ from .mock_data import (
     generate_markets,
 )
 from .models import Market, MarketSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -189,6 +192,7 @@ class KalshiClient:
 
         matched: dict[str, dict[str, Any]] = {}
         for params in search_param_sets:
+            current_series_filter = str(params.get("series_ticker", "")).upper()
             pages_seen = 0
             cursor: str | None = None
             while pages_seen < self.settings.target_market_discovery_pages:
@@ -200,15 +204,73 @@ class KalshiClient:
                 if not rows:
                     break
                 for row in rows:
+                    ticker = str(row.get("ticker", "")).strip()
+                    if not ticker:
+                        continue
+                    # If the query is already scoped by series_ticker, trust API scope.
+                    # Some responses may omit series_ticker in each row, so backfill it.
+                    if current_series_filter:
+                        row_series = str(row.get("series_ticker", "")).upper()
+                        if row_series and row_series != current_series_filter:
+                            continue
+                        if not row_series:
+                            row["series_ticker"] = current_series_filter
+                        matched[ticker] = row
+                        continue
+
                     if not self._matches_targets(row):
                         continue
-                    ticker = str(row.get("ticker", "")).strip()
-                    if ticker:
-                        matched[ticker] = row
+                    matched[ticker] = row
                 pages_seen += 1
                 cursor = payload.get("cursor")
                 if not cursor:
                     break
+
+        # Fallback: if status filter returns no rows, retry once without status.
+        if not matched and self.settings.target_market_status:
+            logger.info(
+                "No markets matched with status=%s; retrying discovery without status filter",
+                self.settings.target_market_status,
+            )
+            base_params_no_status: dict[str, Any] = {"limit": min(1000, max(1, limit))}
+            if self.settings.target_series_tickers:
+                fallback_param_sets = [
+                    {**base_params_no_status, "series_ticker": series}
+                    for series in self.settings.target_series_tickers
+                ]
+            else:
+                fallback_param_sets = [base_params_no_status]
+            for params in fallback_param_sets:
+                current_series_filter = str(params.get("series_ticker", "")).upper()
+                pages_seen = 0
+                cursor: str | None = None
+                while pages_seen < self.settings.target_market_discovery_pages:
+                    page_params = dict(params)
+                    if cursor:
+                        page_params["cursor"] = cursor
+                    payload = self._request_json("GET", "/trade-api/v2/markets", params=page_params)
+                    rows = payload.get("markets") or payload.get("data") or []
+                    if not rows:
+                        break
+                    for row in rows:
+                        ticker = str(row.get("ticker", "")).strip()
+                        if not ticker:
+                            continue
+                        if current_series_filter:
+                            row_series = str(row.get("series_ticker", "")).upper()
+                            if row_series and row_series != current_series_filter:
+                                continue
+                            if not row_series:
+                                row["series_ticker"] = current_series_filter
+                            matched[ticker] = row
+                            continue
+                        if not self._matches_targets(row):
+                            continue
+                        matched[ticker] = row
+                    pages_seen += 1
+                    cursor = payload.get("cursor")
+                    if not cursor:
+                        break
 
         if matched:
             return list(matched.values())[:limit]
